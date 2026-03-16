@@ -6,17 +6,20 @@ import UniformTypeIdentifiers
 struct ResearchReaderApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = LibraryStore()
+    @StateObject private var shortcuts = ShortcutSettingsStore()
 
     var body: some Scene {
         WindowGroup {
             MainWindowView()
                 .environmentObject(store)
+                .environmentObject(shortcuts)
                 .frame(minWidth: 1180, minHeight: 720)
         }
         .windowResizability(.contentSize)
 
         Settings {
-            EmptyView()
+            SettingsView()
+                .environmentObject(shortcuts)
         }
     }
 }

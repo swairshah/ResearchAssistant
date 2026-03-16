@@ -4,10 +4,12 @@ import UniformTypeIdentifiers
 
 struct MainWindowView: View {
     @EnvironmentObject private var store: LibraryStore
+    @EnvironmentObject private var shortcuts: ShortcutSettingsStore
 
     @StateObject private var piBridge = ResearchPiBridge()
     @StateObject private var piChatManager = ResearchPiChatManager()
     @StateObject private var readerController = PDFReaderController()
+    @StateObject private var shortcutMonitor = ShortcutEventMonitor()
     @State private var selectedProjectID: UUID?
     @State private var selectedPaperID: UUID?
     @State private var newProjectName = ""
@@ -157,6 +159,7 @@ struct MainWindowView: View {
         }
         .onAppear {
             piBridge.start(commandHandler: executeBridgeCommand)
+            shortcutMonitor.start(handler: handleShortcutEvent)
             if selectedProjectID == nil {
                 selectedProjectID = store.projects.first?.id
             }
@@ -195,6 +198,9 @@ struct MainWindowView: View {
         }
         .onChange(of: readerController.annotationSummaries) { _, _ in
             syncPiBridgeContext()
+        }
+        .onDisappear {
+            shortcutMonitor.stop()
         }
     }
 
@@ -542,6 +548,38 @@ struct MainWindowView: View {
 
     private func syncPiBridgeContext() {
         piBridge.updateContext(agentContext)
+    }
+
+    private func handleShortcutEvent(_ event: NSEvent) -> Bool {
+        guard let action = shortcuts.matchedAction(for: event) else {
+            return false
+        }
+        executeShortcutAction(action)
+        return true
+    }
+
+    private func executeShortcutAction(_ action: AppShortcutAction) {
+        switch action {
+        case .focusReader:
+            expandSelectedPaper()
+        case .backToLibrary:
+            if isReaderExpanded {
+                isReaderExpanded = false
+            }
+        case .togglePiChat:
+            withAnimation(.spring(duration: 0.24)) {
+                showingAgentChat.toggle()
+            }
+        case .highlightSelection:
+            if isReaderExpanded && readerController.hasSelection {
+                readerController.highlightSelection()
+            }
+        case .addNote:
+            if isReaderExpanded && readerController.isDocumentLoaded {
+                noteDraft = ""
+                showingNoteSheet = true
+            }
+        }
     }
 
     @ViewBuilder
