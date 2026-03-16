@@ -12,7 +12,6 @@ struct PDFDocumentView: NSViewRepresentable {
         view.displaysPageBreaks = true
         view.backgroundColor = .windowBackgroundColor
         view.displaysAsBook = false
-        view.allowsDragging = true
         readerController?.attach(to: view)
         return view
     }

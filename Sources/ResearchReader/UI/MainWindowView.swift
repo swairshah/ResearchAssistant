@@ -5,11 +5,14 @@ import UniformTypeIdentifiers
 struct MainWindowView: View {
     @EnvironmentObject private var store: LibraryStore
 
+    @StateObject private var piBridge = ResearchPiBridge()
+    @StateObject private var piChatManager = ResearchPiChatManager()
     @StateObject private var readerController = PDFReaderController()
     @State private var selectedProjectID: UUID?
     @State private var selectedPaperID: UUID?
     @State private var newProjectName = ""
     @State private var showingProjectSheet = false
+    @State private var showingAgentChat = false
     @State private var showingNoteSheet = false
     @State private var isPaperListDropTargeted = false
     @State private var searchText = ""
@@ -31,6 +34,34 @@ struct MainWindowView: View {
                 .navigationSplitViewStyle(.balanced)
                 .searchable(text: $searchText, placement: .toolbar, prompt: "Search title, author, DOI, arXiv")
             }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            VStack(alignment: .trailing, spacing: 12) {
+                if showingAgentChat {
+                    AgentChatPanel(
+                        chatManager: piChatManager,
+                        context: agentContext,
+                        onClose: { showingAgentChat = false }
+                    )
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+
+                Button {
+                    withAnimation(.spring(duration: 0.24)) {
+                        showingAgentChat.toggle()
+                    }
+                } label: {
+                    Image(systemName: showingAgentChat ? "xmark" : "message.badge.waveform.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: 48, height: 48)
+                        .foregroundStyle(.white)
+                        .background(Color.accentColor, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .shadow(color: .black.opacity(0.16), radius: 12, y: 6)
+                .help("Open Pi agent")
+            }
+            .padding(20)
         }
         .sheet(isPresented: $showingProjectSheet) {
             NewProjectSheet(
@@ -125,19 +156,23 @@ struct MainWindowView: View {
             }
         }
         .onAppear {
+            piBridge.start(commandHandler: executeBridgeCommand)
             if selectedProjectID == nil {
                 selectedProjectID = store.projects.first?.id
             }
             syncPaperSelection()
+            syncPiBridgeContext()
         }
         .onChange(of: store.projects) { _, _ in
             if selectedProjectID == nil {
                 selectedProjectID = store.projects.first?.id
             }
             syncPaperSelection()
+            syncPiBridgeContext()
         }
         .onChange(of: selectedProjectID) { _, _ in
             syncPaperSelection()
+            syncPiBridgeContext()
         }
         .onChange(of: searchText) { _, _ in
             syncPaperSelection()
@@ -146,6 +181,20 @@ struct MainWindowView: View {
             if isReaderExpanded, selectedPaper == nil {
                 isReaderExpanded = false
             }
+            syncPiBridgeContext()
+        }
+        .onChange(of: piChatManager.pendingCommands.count) { _, count in
+            guard count > 0 else { return }
+            executeAgentCommands()
+        }
+        .onChange(of: readerController.currentPageNumber) { _, _ in
+            syncPiBridgeContext()
+        }
+        .onChange(of: readerController.pageCount) { _, _ in
+            syncPiBridgeContext()
+        }
+        .onChange(of: readerController.annotationSummaries) { _, _ in
+            syncPiBridgeContext()
         }
     }
 
@@ -304,6 +353,18 @@ struct MainWindowView: View {
         return store.pdfURL(for: selectedPaper)
     }
 
+    private var agentContext: AgentContextSnapshot {
+        AgentContextSnapshot(
+            projectName: store.project(for: selectedProjectID)?.name,
+            projectPaperCount: store.papers(in: selectedProjectID).count,
+            paper: selectedPaper,
+            pdfURL: selectedPaperPDFURL,
+            currentPage: selectedPaper != nil ? readerController.currentPageNumber : nil,
+            pageCount: selectedPaper != nil ? readerController.pageCount : nil,
+            annotations: selectedPaper != nil ? readerController.annotationSummaries : []
+        )
+    }
+
     private var filteredPapers: [Paper] {
         let papers = store.papers(in: selectedProjectID)
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -421,6 +482,66 @@ struct MainWindowView: View {
     private func expandSelectedPaper() {
         guard selectedPaper != nil, selectedPaperPDFURL != nil else { return }
         isReaderExpanded = true
+    }
+
+    private func executeAgentCommands() {
+        let commands = piChatManager.consumePendingCommands()
+        guard !commands.isEmpty else { return }
+
+        if !isReaderExpanded, selectedPaper != nil {
+            isReaderExpanded = true
+        }
+
+        for command in commands {
+            switch command {
+            case .goToPage(let page):
+                readerController.goToPage(page)
+            case .focusAnnotation(let annotationID):
+                readerController.focusAnnotation(id: annotationID)
+            case .previewAnnotation(let annotationID):
+                readerController.previewAnnotation(id: annotationID)
+            case .previewText(let page, let text):
+                readerController.previewText(page: page, text: text)
+            case .clearPreview:
+                readerController.clearPreview()
+            }
+        }
+    }
+
+    private func executeBridgeCommand(_ command: AgentUICommand) -> String {
+        switch command {
+        case .goToPage(let page):
+            if !isReaderExpanded, selectedPaper != nil {
+                isReaderExpanded = true
+            }
+            readerController.goToPage(page)
+            return "Moved to page \(page)."
+        case .focusAnnotation(let annotationID):
+            if !isReaderExpanded, selectedPaper != nil {
+                isReaderExpanded = true
+            }
+            readerController.focusAnnotation(id: annotationID)
+            return "Focused annotation \(annotationID)."
+        case .previewAnnotation(let annotationID):
+            if !isReaderExpanded, selectedPaper != nil {
+                isReaderExpanded = true
+            }
+            readerController.previewAnnotation(id: annotationID)
+            return "Previewed annotation \(annotationID)."
+        case .previewText(let page, let text):
+            if !isReaderExpanded, selectedPaper != nil {
+                isReaderExpanded = true
+            }
+            readerController.previewText(page: page, text: text)
+            return "Previewed text on page \(page): \(text)"
+        case .clearPreview:
+            readerController.clearPreview()
+            return "Cleared PDF preview."
+        }
+    }
+
+    private func syncPiBridgeContext() {
+        piBridge.updateContext(agentContext)
     }
 
     @ViewBuilder
