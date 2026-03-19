@@ -192,8 +192,12 @@ final class PDFReaderController: ObservableObject {
     }
 
     func highlightSelection() {
+        highlightSelection(from: nil)
+    }
+
+    func highlightSelection(from explicitSelection: PDFSelection?) {
         guard let paperID = activePaperID else { return }
-        guard let selection = currentOrCachedSelection(),
+        guard let selection = explicitSelection ?? currentOrCachedSelection(),
               let selectedText = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines),
               !selectedText.isEmpty else {
             return

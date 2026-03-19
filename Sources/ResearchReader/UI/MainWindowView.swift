@@ -124,27 +124,6 @@ struct MainWindowView: View {
                     .disabled(selectedPaper == nil)
 
                     Button {
-                        readerController.highlightSelection()
-                    } label: {
-                        Label("Highlight", systemImage: "highlighter")
-                    }
-                    .disabled(selectedPaper == nil || !readerController.hasSelection)
-
-                    Button {
-                        readerController.removeHighlightsInSelection()
-                    } label: {
-                        Label("Remove Highlight", systemImage: "eraser")
-                    }
-                    .disabled(selectedPaper == nil || !readerController.isDocumentLoaded)
-
-                    Button {
-                        noteDraft = ""
-                        showingNoteSheet = true
-                    } label: {
-                        Label("Add Note", systemImage: "note.text.badge.plus")
-                    }
-
-                    Button {
                         withAnimation(.easeInOut(duration: 0.18)) {
                             isNotebookVisible.toggle()
                         }
@@ -172,28 +151,6 @@ struct MainWindowView: View {
                         Label("Focus Reader", systemImage: "book.pages")
                     }
                     .disabled(selectedPaper == nil || selectedPaperPDFURL == nil)
-
-                    Button {
-                        readerController.highlightSelection()
-                    } label: {
-                        Label("Highlight", systemImage: "highlighter")
-                    }
-                    .disabled(selectedPaper == nil || !readerController.hasSelection)
-
-                    Button {
-                        readerController.removeHighlightsInSelection()
-                    } label: {
-                        Label("Remove Highlight", systemImage: "eraser")
-                    }
-                    .disabled(selectedPaper == nil || !readerController.isDocumentLoaded)
-
-                    Button {
-                        noteDraft = ""
-                        showingNoteSheet = true
-                    } label: {
-                        Label("Add Note", systemImage: "note.text.badge.plus")
-                    }
-                    .disabled(selectedPaper == nil || !readerController.isDocumentLoaded)
 
                     Button {
                         withAnimation(.easeInOut(duration: 0.18)) {
@@ -267,6 +224,15 @@ struct MainWindowView: View {
         }
         .onChange(of: notebookStore.markdown) { _, _ in
             syncPiBridgeContext()
+        }
+        .onChange(of: isNotebookVisible) { _, isVisible in
+            guard isVisible,
+                  !isReaderExpanded,
+                  selectedPaper != nil,
+                  selectedPaperPDFURL != nil else { return }
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isReaderExpanded = true
+            }
         }
         .onDisappear {
             shortcutMonitor.stop()
