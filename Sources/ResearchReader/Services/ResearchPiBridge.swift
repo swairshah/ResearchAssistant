@@ -92,6 +92,8 @@ private struct BridgeContextPayload: Codable {
     let currentSelection: BridgeSelectionPayload?
     let annotations: [BridgeAnnotationPayload]
     let notebook: BridgeNotebookPayload?
+    let isFocusReaderVisible: Bool
+    let isNotebookVisible: Bool
 
     init(snapshot: AgentContextSnapshot) {
         self.projectName = snapshot.projectName
@@ -102,6 +104,7 @@ private struct BridgeContextPayload: Codable {
         self.currentSelection = snapshot.currentSelection.map { BridgeSelectionPayload(summary: $0) }
         self.paper = snapshot.paper.map {
             BridgePaperPayload(
+                id: $0.id.uuidString,
                 title: $0.title,
                 authors: $0.authors,
                 venue: $0.venue,
@@ -122,6 +125,8 @@ private struct BridgeContextPayload: Codable {
             )
         }
         self.notebook = snapshot.notebook.map { BridgeNotebookPayload(snapshot: $0) }
+        self.isFocusReaderVisible = snapshot.isFocusReaderVisible
+        self.isNotebookVisible = snapshot.isNotebookVisible
     }
 }
 
@@ -144,6 +149,7 @@ private struct BridgeProjectPaperPayload: Codable {
 }
 
 private struct BridgePaperPayload: Codable {
+    let id: String
     let title: String
     let authors: [String]
     let venue: String?
@@ -201,6 +207,9 @@ private struct BridgeCommandPayload: Codable {
     let text: String?
     let annotationID: String?
     let markdown: String?
+    let paperID: String?
+    let action: String?
+    let openReader: Bool?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -209,6 +218,9 @@ private struct BridgeCommandPayload: Codable {
         case text
         case annotationID = "annotationId"
         case markdown
+        case paperID = "paperId"
+        case action
+        case openReader
     }
 
     func toUICommand() -> AgentUICommand {
@@ -227,6 +239,20 @@ private struct BridgeCommandPayload: Codable {
             return .replaceProjectNotebook(markdown ?? "")
         case "append_notebook":
             return .appendProjectNotebook(markdown ?? "")
+        case "select_paper":
+            return .selectPaper(paperID: paperID ?? "", openInFocusReader: openReader ?? true)
+        case "set_notebook_visibility":
+            let value = PanelVisibilityAction(rawValue: (action ?? "toggle").lowercased()) ?? .toggle
+            return .setNotebookVisibility(value)
+        case "set_focus_reader_visibility":
+            let value = PanelVisibilityAction(rawValue: (action ?? "toggle").lowercased()) ?? .toggle
+            return .setFocusReaderVisibility(value)
+        case "add_note":
+            return .addNote(text ?? "")
+        case "highlight_selection":
+            return .highlightSelection
+        case "remove_highlights_in_selection":
+            return .removeHighlightsInSelection
         default:
             return .clearPreview
         }

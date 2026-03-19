@@ -52,6 +52,8 @@ actor PiRpcProcess {
     struct RpcAgentMessage: Decodable {
         let role: String
         let content: AnyCodable?
+        let stopReason: String?
+        let errorMessage: String?
     }
 
     enum Status: Sendable {
@@ -63,7 +65,7 @@ actor PiRpcProcess {
     enum StreamDelta: Sendable {
         case textDelta(String)
         case toolStart(name: String, toolCallId: String)
-        case toolEnd(name: String, toolCallId: String, isError: Bool)
+        case toolEnd(name: String, toolCallId: String, isError: Bool, resultText: String?)
         case agentEnd
         case error(String)
     }
@@ -78,6 +80,7 @@ actor PiRpcProcess {
     private var stderrTask: Task<Void, Never>?
     private var deltaHandler: DeltaHandler?
     private var pendingPromptContinuation: CheckedContinuation<Void, Error>?
+    private var receivedTextForCurrentPrompt = false
 
     private let piPath: String
     private let extensionPath: String
@@ -147,6 +150,7 @@ actor PiRpcProcess {
         try ensureRunning()
 
         deltaHandler = onDelta
+        receivedTextForCurrentPrompt = false
         let promptId = "p-\(UUID().uuidString)"
         let cmd = RpcCommand(type: "prompt", id: promptId, message: message)
         logger.info("prompt: sending [\(promptId)] — \(message.prefix(120))…")
@@ -275,15 +279,19 @@ actor PiRpcProcess {
         args += ["--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"]
         args += ["--extension", extensionPath]
         args += ["--session-dir", sessionDir]
-        args += ["--provider", "anthropic"]
-        args += ["--model", "claude-haiku-4-5"]
+        // Default to a provider/model known to work in this environment.
+        args += ["--provider", "google"]
+        args += ["--model", "gemini-2.5-flash"]
         args += ["--system", systemPrompt]
         return args
     }
 
     private func buildEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        env["PI_CODING_AGENT_DIR"] = configDir
+        // Prefer the user's global Pi auth/config so the embedded agent behaves
+        // like their normal Pi CLI session.
+        let homePiDir = NSHomeDirectory() + "/.pi"
+        env["PI_CODING_AGENT_DIR"] = homePiDir
         env["RESEARCHREADER_BRIDGE_DIR"] = bridgeDir
         return env
     }
@@ -326,6 +334,7 @@ actor PiRpcProcess {
                 switch ame.type {
                 case "text_delta":
                     if let delta = ame.delta {
+                        receivedTextForCurrentPrompt = true
                         deltaHandler?(.textDelta(delta))
                     }
                 case "thinking_delta":
@@ -358,14 +367,21 @@ actor PiRpcProcess {
             let toolName = event.toolName ?? "unknown"
             let callId = event.toolCallId ?? "?"
             let isErr = event.isError ?? false
+            let resultText = toolResultText(from: event.result)
             logger.info("🔧 tool_execution_end: \(toolName) [\(callId)] isError=\(isErr)")
-            deltaHandler?(.toolEnd(name: toolName, toolCallId: callId, isError: isErr))
+            deltaHandler?(.toolEnd(name: toolName, toolCallId: callId, isError: isErr, resultText: resultText))
 
         case "agent_start":
             logger.info("▶ agent_start")
 
         case "agent_end":
             logger.info("■ agent_end")
+
+            if let messages = event.messages,
+               let err = assistantError(from: messages) {
+                deltaHandler?(.error(err))
+            }
+
             deltaHandler?(.agentEnd)
             let cont = pendingPromptContinuation
             pendingPromptContinuation = nil
@@ -402,6 +418,16 @@ actor PiRpcProcess {
             let cmdName = event.command ?? "?"
             if event.success == true {
                 logger.info("✓ response: \(cmdName) succeeded")
+
+                // Some providers may return assistant text only in response.messages
+                // instead of streaming text_delta events.
+                if !receivedTextForCurrentPrompt,
+                   let messages = event.messages,
+                   let fallbackText = assistantText(from: messages),
+                   !fallbackText.isEmpty {
+                    receivedTextForCurrentPrompt = true
+                    deltaHandler?(.textDelta(fallbackText))
+                }
             } else {
                 let errMsg = event.error ?? "unknown error"
                 logger.error("✗ response: \(cmdName) failed — \(errMsg)")
@@ -430,6 +456,85 @@ actor PiRpcProcess {
         cont?.resume(throwing: PiRpcError.processExited(exitCode))
     }
 
+    private func toolResultText(from result: AnyCodable?) -> String? {
+        guard let value = result?.value else { return nil }
+        let text = extractText(from: value).trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    private func assistantText(from messages: [RpcAgentMessage]) -> String? {
+        for message in messages.reversed() where message.role.lowercased() == "assistant" {
+            guard let value = message.content?.value else { continue }
+            let text = extractText(from: value).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                return text
+            }
+        }
+        return nil
+    }
+
+    private func assistantError(from messages: [RpcAgentMessage]) -> String? {
+        for message in messages.reversed() where message.role.lowercased() == "assistant" {
+            if let error = message.errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !error.isEmpty {
+                return error
+            }
+        }
+        return nil
+    }
+
+    private func extractText(from value: Any) -> String {
+        if let text = value as? String {
+            return text
+        }
+
+        if let array = value as? [Any] {
+            return array
+                .map { extractText(from: $0) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+        }
+
+        if let dict = value as? [String: Any] {
+            var chunks: [String] = []
+
+            if let type = dict["type"] as? String,
+               type == "text",
+               let text = dict["text"] as? String {
+                chunks.append(text)
+            }
+
+            if let text = dict["text"] as? String {
+                chunks.append(text)
+            }
+
+            if let content = dict["content"] {
+                let extracted = extractText(from: content)
+                if !extracted.isEmpty {
+                    chunks.append(extracted)
+                }
+            }
+
+            if let message = dict["message"] {
+                let extracted = extractText(from: message)
+                if !extracted.isEmpty {
+                    chunks.append(extracted)
+                }
+            }
+
+            if let value = dict["value"] {
+                let extracted = extractText(from: value)
+                if !extracted.isEmpty {
+                    chunks.append(extracted)
+                }
+            }
+
+            return chunks.joined(separator: "\n")
+        }
+
+        return ""
+    }
+
     // MARK: - System Prompt
 
     private let systemPrompt = """
@@ -448,11 +553,13 @@ Behavior:
 - Treat the active project as the user's working set and the active paper as the primary reference.
 - When the user refers to the project notebook, notes, "this paper", the current page, highlights, or PDF navigation, call `get_reader_context` first unless the answer is already obvious from the conversation.
 - Use the PDF tools directly when navigation or temporary preview would help the user.
+- When the user asks to control the app UI (choose paper, open/close Focus Reader, open/close notebook, add note, highlight/remove highlight), use the corresponding ResearchReader tools directly.
 - Read or update the project notebook using the notebook tools instead of asking the user to copy text manually.
 - If the user asks you to add to, update, summarize into, or save something in the notebook, you must use `get_project_notebook` plus `append_project_notebook` or `replace_project_notebook` before you answer.
 - Do not merely say that you can update the notebook. Perform the notebook tool call when asked, then report what you changed.
 - Do not reintroduce yourself, restate your instructions, or ask a generic "what would you like to do?" when the user has already made a concrete request.
 - If the user gives a direct action request, execute it immediately with tools when possible, then answer with the result.
+- Always include at least one short natural-language sentence in your final answer; do not end a turn with only tool calls.
 """
 }
 

@@ -101,12 +101,16 @@ struct AgentChatPanel: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("PI NOTEBOOK ASSISTANT")
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Text(contextSummaryLine)
+                    .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.secondary)
-                Spacer()
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Spacer(minLength: 8)
+
                 if !chatManager.messages.isEmpty {
                     Button("Clear") {
                         chatManager.clearConversation()
@@ -121,20 +125,15 @@ struct AgentChatPanel: View {
                 .buttonStyle(.plain)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                contextRow(title: "Project", value: context.projectName ?? "None")
-                contextRow(title: "Notebook", value: notebookStatusText)
-                contextRow(title: "Paper", value: context.paper?.title ?? "None")
-            }
-
             if !chatManager.isPiAvailable || !chatManager.isExtensionAvailable {
                 Text("Pi chat needs both a local `pi` binary and the app-local ResearchReader extension.")
                     .font(.caption)
                     .foregroundStyle(.orange)
+                    .lineLimit(2)
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, 10)
     }
 
     private var messages: some View {
@@ -240,17 +239,14 @@ struct AgentChatPanel: View {
         return "\(notebook.projectName) notebook, \(count) chars"
     }
 
-    private func contextRow(title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title.uppercased())
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(size: 13, design: .monospaced))
-                .lineLimit(2)
-        }
+    private var contextSummaryLine: String {
+        let projectText = "Project: \(context.projectName ?? "None")"
+        let notebookText = "Notebook: \(notebookStatusText)"
+        let paperText = "Paper: \(context.paper?.title ?? "None")"
+        return [projectText, notebookText, paperText].joined(separator: " · ")
     }
 }
+
 
 private struct AgentStreamingBubble: View {
     let text: String

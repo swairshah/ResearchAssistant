@@ -18,6 +18,8 @@ struct AgentContextSnapshot {
     let currentSelection: PDFSelectionSummary?
     let annotations: [PDFAnnotationSummary]
     let notebook: ProjectNotebookSnapshot?
+    let isFocusReaderVisible: Bool
+    let isNotebookVisible: Bool
 }
 
 struct PDFSelectionSummary: Hashable {
@@ -65,6 +67,12 @@ struct PDFAnnotationSummary: Hashable {
     }
 }
 
+enum PanelVisibilityAction: String, Equatable {
+    case open
+    case close
+    case toggle
+}
+
 enum AgentUICommand: Equatable {
     case goToPage(Int)
     case focusAnnotation(String)
@@ -73,4 +81,11 @@ enum AgentUICommand: Equatable {
     case clearPreview
     case replaceProjectNotebook(String)
     case appendProjectNotebook(String)
+
+    case selectPaper(paperID: String, openInFocusReader: Bool)
+    case setNotebookVisibility(PanelVisibilityAction)
+    case setFocusReaderVisibility(PanelVisibilityAction)
+    case addNote(String)
+    case highlightSelection
+    case removeHighlightsInSelection
 }

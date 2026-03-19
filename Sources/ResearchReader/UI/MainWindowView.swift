@@ -428,7 +428,9 @@ struct MainWindowView: View {
             pageCount: selectedPaper != nil ? readerController.pageCount : nil,
             currentSelection: selectedPaper != nil ? readerController.currentSelection : nil,
             annotations: selectedPaper != nil ? readerController.annotationSummaries : [],
-            notebook: notebookStore.snapshot(project: selectedProject, papers: store.papers(in: selectedProjectID))
+            notebook: notebookStore.snapshot(project: selectedProject, papers: store.papers(in: selectedProjectID)),
+            isFocusReaderVisible: isReaderExpanded,
+            isNotebookVisible: isNotebookVisible
         )
     }
 
@@ -562,63 +564,45 @@ struct MainWindowView: View {
         let commands = piChatManager.consumePendingCommands()
         guard !commands.isEmpty else { return }
 
-        if !isReaderExpanded, selectedPaper != nil {
-            isReaderExpanded = true
-        }
-
         for command in commands {
-            switch command {
-            case .goToPage(let page):
-                readerController.goToPage(page)
-            case .focusAnnotation(let annotationID):
-                readerController.focusAnnotation(id: annotationID)
-            case .previewAnnotation(let annotationID):
-                readerController.previewAnnotation(id: annotationID)
-            case .previewText(let page, let text):
-                readerController.previewText(page: page, text: text)
-            case .clearPreview:
-                readerController.clearPreview()
-            case .replaceProjectNotebook(let markdown):
-                if let project = selectedProject {
-                    notebookStore.replaceNotebook(with: markdown, for: project)
-                }
-            case .appendProjectNotebook(let markdown):
-                if let project = selectedProject {
-                    notebookStore.appendToNotebook(markdown, for: project)
-                }
-            }
+            _ = executeBridgeCommand(command)
         }
     }
 
     private func executeBridgeCommand(_ command: AgentUICommand) -> String {
         switch command {
         case .goToPage(let page):
-            if !isReaderExpanded, selectedPaper != nil {
-                isReaderExpanded = true
+            guard prepareReaderForNavigation() == nil else {
+                return "No active paper PDF is open."
             }
             readerController.goToPage(page)
             return "Moved to page \(page)."
+
         case .focusAnnotation(let annotationID):
-            if !isReaderExpanded, selectedPaper != nil {
-                isReaderExpanded = true
+            guard prepareReaderForNavigation() == nil else {
+                return "No active paper PDF is open."
             }
             readerController.focusAnnotation(id: annotationID)
             return "Focused annotation \(annotationID)."
+
         case .previewAnnotation(let annotationID):
-            if !isReaderExpanded, selectedPaper != nil {
-                isReaderExpanded = true
+            guard prepareReaderForNavigation() == nil else {
+                return "No active paper PDF is open."
             }
             readerController.previewAnnotation(id: annotationID)
             return "Previewed annotation \(annotationID)."
+
         case .previewText(let page, let text):
-            if !isReaderExpanded, selectedPaper != nil {
-                isReaderExpanded = true
+            guard prepareReaderForNavigation() == nil else {
+                return "No active paper PDF is open."
             }
             readerController.previewText(page: page, text: text)
             return "Previewed text on page \(page): \(text)"
+
         case .clearPreview:
             readerController.clearPreview()
             return "Cleared PDF preview."
+
         case .replaceProjectNotebook(let markdown):
             guard let project = selectedProject else {
                 return "No active project is selected."
@@ -626,6 +610,7 @@ struct MainWindowView: View {
             notebookStore.replaceNotebook(with: markdown, for: project)
             syncPiBridgeContext()
             return "Replaced the notebook for \(project.name)."
+
         case .appendProjectNotebook(let markdown):
             guard let project = selectedProject else {
                 return "No active project is selected."
@@ -633,7 +618,122 @@ struct MainWindowView: View {
             notebookStore.appendToNotebook(markdown, for: project)
             syncPiBridgeContext()
             return "Appended to the notebook for \(project.name)."
+
+        case .selectPaper(let paperID, let openInFocusReader):
+            return selectPaperForAgent(paperID: paperID, openInFocusReader: openInFocusReader)
+
+        case .setNotebookVisibility(let action):
+            guard selectedProject != nil else {
+                return "No active project is selected."
+            }
+            switch action {
+            case .open:
+                isNotebookVisible = true
+                syncPiBridgeContext()
+                return "Opened notebook panel."
+            case .close:
+                isNotebookVisible = false
+                syncPiBridgeContext()
+                return "Closed notebook panel."
+            case .toggle:
+                isNotebookVisible.toggle()
+                syncPiBridgeContext()
+                return isNotebookVisible ? "Opened notebook panel." : "Closed notebook panel."
+            }
+
+        case .setFocusReaderVisibility(let action):
+            switch action {
+            case .open:
+                guard selectedPaper != nil, selectedPaperPDFURL != nil else {
+                    return "No paper with a local PDF is selected."
+                }
+                isReaderExpanded = true
+                syncPiBridgeContext()
+                return "Opened Focus Reader."
+            case .close:
+                isReaderExpanded = false
+                syncPiBridgeContext()
+                return "Closed Focus Reader."
+            case .toggle:
+                if isReaderExpanded {
+                    isReaderExpanded = false
+                    syncPiBridgeContext()
+                    return "Closed Focus Reader."
+                }
+                guard selectedPaper != nil, selectedPaperPDFURL != nil else {
+                    return "No paper with a local PDF is selected."
+                }
+                isReaderExpanded = true
+                syncPiBridgeContext()
+                return "Opened Focus Reader."
+            }
+
+        case .addNote(let text):
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                return "Note text is empty."
+            }
+            guard prepareReaderForEditing() == nil else {
+                return "PDF view is not ready yet. Open Focus Reader and try again."
+            }
+            readerController.addNote(trimmed)
+            return "Added note."
+
+        case .highlightSelection:
+            guard prepareReaderForEditing() == nil else {
+                return "PDF view is not ready yet. Select text in the PDF first."
+            }
+            readerController.highlightSelection()
+            return "Applied highlight to current selection."
+
+        case .removeHighlightsInSelection:
+            guard prepareReaderForEditing() == nil else {
+                return "PDF view is not ready yet."
+            }
+            readerController.removeHighlightsInSelection()
+            return "Removed highlight(s) from current selection/context."
         }
+    }
+
+    private func prepareReaderForNavigation() -> String? {
+        guard selectedPaper != nil, selectedPaperPDFURL != nil else {
+            return "No paper with a local PDF is selected."
+        }
+        if !isReaderExpanded {
+            isReaderExpanded = true
+        }
+        return nil
+    }
+
+    private func prepareReaderForEditing() -> String? {
+        if let error = prepareReaderForNavigation() {
+            return error
+        }
+        guard readerController.isDocumentLoaded else {
+            return "PDF is not loaded yet."
+        }
+        return nil
+    }
+
+    private func selectPaperForAgent(paperID: String, openInFocusReader: Bool) -> String {
+        guard let id = UUID(uuidString: paperID) else {
+            return "Invalid paper ID: \(paperID)"
+        }
+        guard let paper = store.paper(for: id) else {
+            return "Paper not found for ID: \(paperID)"
+        }
+
+        selectedProjectID = paper.projectID
+        selectedPaperID = paper.id
+
+        if openInFocusReader {
+            isReaderExpanded = true
+        }
+
+        syncPiBridgeContext()
+        return openInFocusReader
+            ? "Selected paper '\(paper.title)' and opened Focus Reader."
+            : "Selected paper '\(paper.title)'."
     }
 
     private func syncPiBridgeContext() {

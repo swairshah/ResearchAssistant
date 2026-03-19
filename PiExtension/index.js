@@ -1,10 +1,13 @@
 const fs = require("fs/promises");
+const os = require("os");
 const path = require("path");
 
-const bridgeDir = process.env.RESEARCHREADER_BRIDGE_DIR;
-const contextFile = bridgeDir ? path.join(bridgeDir, "context.json") : null;
-const commandsDir = bridgeDir ? path.join(bridgeDir, "commands") : null;
-const resultsDir = bridgeDir ? path.join(bridgeDir, "results") : null;
+const bridgeDir =
+	process.env.RESEARCHREADER_BRIDGE_DIR ||
+	path.join(os.homedir(), "Library", "Application Support", "ResearchReader", "pi-bridge");
+const contextFile = path.join(bridgeDir, "context.json");
+const commandsDir = path.join(bridgeDir, "commands");
+const resultsDir = path.join(bridgeDir, "results");
 
 const EMPTY_OBJECT = {
 	type: "object",
@@ -13,8 +16,8 @@ const EMPTY_OBJECT = {
 };
 
 function requireBridgeDir() {
-	if (!bridgeDir || !contextFile || !commandsDir || !resultsDir) {
-		throw new Error("RESEARCHREADER_BRIDGE_DIR is not configured.");
+	if (!bridgeDir) {
+		throw new Error("ResearchReader bridge directory is not configured.");
 	}
 }
 
@@ -232,6 +235,123 @@ module.exports = function researchReaderExtension(pi) {
 		async execute(_toolCallId, params) {
 			const markdown = String(params.markdown);
 			const message = await sendCommand({ command: "append_notebook", markdown });
+			return toolResult(message);
+		},
+	});
+
+	pi.registerTool({
+		name: "select_project_paper",
+		label: "Select Project Paper",
+		description: "Select a paper by ID from get_reader_context.projectPapers and optionally open Focus Reader.",
+		parameters: {
+			type: "object",
+			properties: {
+				paperId: {
+					type: "string",
+					description: "Paper UUID from get_reader_context.projectPapers[].id",
+				},
+				openReader: {
+					type: "boolean",
+					description: "When true (default), open Focus Reader after selecting the paper.",
+				},
+			},
+			required: ["paperId"],
+			additionalProperties: false,
+		},
+		async execute(_toolCallId, params) {
+			const paperId = String(params.paperId);
+			const openReader = params.openReader === undefined ? true : Boolean(params.openReader);
+			const message = await sendCommand({ command: "select_paper", paperId, openReader });
+			return toolResult(message);
+		},
+	});
+
+	pi.registerTool({
+		name: "set_focus_reader_visibility",
+		label: "Set Focus Reader Visibility",
+		description: "Open, close, or toggle the Focus Reader panel.",
+		parameters: {
+			type: "object",
+			properties: {
+				action: {
+					type: "string",
+					enum: ["open", "close", "toggle"],
+					description: "Visibility action.",
+				},
+			},
+			required: ["action"],
+			additionalProperties: false,
+		},
+		async execute(_toolCallId, params) {
+			const action = String(params.action);
+			const message = await sendCommand({ command: "set_focus_reader_visibility", action });
+			return toolResult(message);
+		},
+	});
+
+	pi.registerTool({
+		name: "set_notebook_visibility",
+		label: "Set Notebook Visibility",
+		description: "Open, close, or toggle the project notebook panel.",
+		parameters: {
+			type: "object",
+			properties: {
+				action: {
+					type: "string",
+					enum: ["open", "close", "toggle"],
+					description: "Visibility action.",
+				},
+			},
+			required: ["action"],
+			additionalProperties: false,
+		},
+		async execute(_toolCallId, params) {
+			const action = String(params.action);
+			const message = await sendCommand({ command: "set_notebook_visibility", action });
+			return toolResult(message);
+		},
+	});
+
+	pi.registerTool({
+		name: "add_pdf_note",
+		label: "Add PDF Note",
+		description: "Add a note annotation in the active PDF. If text is selected, it anchors near selection.",
+		parameters: {
+			type: "object",
+			properties: {
+				text: {
+					type: "string",
+					description: "Note text to add.",
+				},
+			},
+			required: ["text"],
+			additionalProperties: false,
+		},
+		async execute(_toolCallId, params) {
+			const text = String(params.text);
+			const message = await sendCommand({ command: "add_note", text });
+			return toolResult(message);
+		},
+	});
+
+	pi.registerTool({
+		name: "highlight_pdf_selection",
+		label: "Highlight PDF Selection",
+		description: "Highlight the current text selection in the active PDF.",
+		parameters: EMPTY_OBJECT,
+		async execute() {
+			const message = await sendCommand({ command: "highlight_selection" });
+			return toolResult(message);
+		},
+	});
+
+	pi.registerTool({
+		name: "remove_pdf_highlights_in_selection",
+		label: "Remove PDF Highlights In Selection",
+		description: "Remove highlight(s) intersecting current selection or the last clicked highlight.",
+		parameters: EMPTY_OBJECT,
+		async execute() {
+			const message = await sendCommand({ command: "remove_highlights_in_selection" });
 			return toolResult(message);
 		},
 	});

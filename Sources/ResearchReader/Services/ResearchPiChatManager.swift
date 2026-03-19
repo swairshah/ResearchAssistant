@@ -160,6 +160,7 @@ final class ResearchPiChatManager: ObservableObject {
 
         // Thread-safe accumulator for streaming text
         let accumulator = StreamTextAccumulator()
+        let toolFallbacks = StreamTextAccumulator()
 
         try await rpc.prompt(message) { [weak self] delta in
             switch delta {
@@ -177,8 +178,19 @@ final class ResearchPiChatManager: ObservableObject {
                     self?.activityStatus = "Running \(displayName)…"
                 }
 
-            case .toolEnd(let name, let callId, let isError):
+            case .toolEnd(let name, let callId, let isError, let resultText):
                 logger.info("toolEnd: \(name) [\(callId)] error=\(isError)")
+                if !isError,
+                   let resultText {
+                    let trimmed = resultText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty,
+                       trimmed.count <= 220,
+                       !trimmed.hasPrefix("{"),
+                       !trimmed.hasPrefix("[") {
+                        _ = toolFallbacks.append(trimmed + "\n")
+                    }
+                }
+
                 Task { @MainActor [weak self] in
                     if isError {
                         self?.activityStatus = "\(Self.friendlyToolName(name)) failed"
@@ -199,7 +211,22 @@ final class ResearchPiChatManager: ObservableObject {
             }
         }
 
-        return accumulator.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = accumulator.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty {
+            return text
+        }
+
+        let fallbackLines = toolFallbacks.text
+            .split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let uniqueFallbacks = Array(NSOrderedSet(array: fallbackLines)) as? [String] ?? fallbackLines
+        if !uniqueFallbacks.isEmpty {
+            return uniqueFallbacks.joined(separator: "\n")
+        }
+
+        return ""
     }
 
     /// Map internal tool names to readable labels for the UI status.
@@ -214,6 +241,12 @@ final class ResearchPiChatManager: ObservableObject {
         case "preview_pdf_annotation":  return "previewing annotation"
         case "preview_pdf_text":        return "previewing text"
         case "clear_pdf_preview":       return "clearing preview"
+        case "select_project_paper":    return "selecting paper"
+        case "set_focus_reader_visibility": return "toggling reader"
+        case "set_notebook_visibility": return "toggling notebook"
+        case "add_pdf_note":            return "adding note"
+        case "highlight_pdf_selection": return "highlighting text"
+        case "remove_pdf_highlights_in_selection": return "removing highlights"
         default:                        return name
         }
     }
@@ -333,7 +366,10 @@ final class ResearchPiChatManager: ObservableObject {
             .replacingOccurrences(of: "\n\n\n", with: "\n\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        return (cleaned.isEmpty ? "Done." : cleaned, commands)
+        if cleaned.isEmpty {
+            return (commands.isEmpty ? "Action completed." : "Action completed.", commands)
+        }
+        return (cleaned, commands)
     }
 
     private func parsePreviewTextDirective(_ value: String) -> AgentUICommand? {
