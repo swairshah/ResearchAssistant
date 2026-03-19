@@ -160,16 +160,22 @@ final class ReaderPDFView: PDFView {
             return
         }
 
+        let capturedSelection: PDFSelection?
         if let selection = currentSelection {
-            pendingQuickHighlightSelection = (selection.copy() as? PDFSelection) ?? selection
+            capturedSelection = (selection.copy() as? PDFSelection) ?? selection
         } else {
-            pendingQuickHighlightSelection = nil
+            capturedSelection = nil
         }
 
         let point = convert(event.locationInWindow, from: nil)
         let anchorRect = NSRect(x: point.x, y: point.y, width: 1, height: 1)
 
-        hideQuickHighlightPopover()
+        // Close any existing popover without clearing the just-captured selection.
+        if quickHighlightPopover.isShown {
+            quickHighlightPopover.performClose(nil)
+        }
+
+        pendingQuickHighlightSelection = capturedSelection
         quickHighlightPopover.show(relativeTo: anchorRect, of: self, preferredEdge: .maxY)
 
         hideQuickHighlightWorkItem?.cancel()
