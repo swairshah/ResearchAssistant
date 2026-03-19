@@ -1,9 +1,36 @@
 import Foundation
+import os.log
+
+private let logger = Logger(subsystem: "com.researchreader", category: "PiChat")
+
+/// Thread-safe accumulator for streaming text. Sendable so it can be
+/// captured safely by the @Sendable delta handler closure.
+private final class StreamTextAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _text = ""
+
+    var text: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return _text
+    }
+
+    /// Appends a fragment and returns the new accumulated text.
+    @discardableResult
+    func append(_ fragment: String) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        _text += fragment
+        return _text
+    }
+}
 
 @MainActor
 final class ResearchPiChatManager: ObservableObject {
     @Published private(set) var messages: [AgentChatMessage] = []
     @Published private(set) var isProcessing = false
+    @Published private(set) var streamingText: String = ""
+    @Published private(set) var activityStatus: String = ""
     @Published private(set) var pendingCommands: [AgentUICommand] = []
 
     private let paths: AppPaths
@@ -11,6 +38,9 @@ final class ResearchPiChatManager: ObservableObject {
     private let decoder = JSONDecoder()
     private let piPath: String
     private let extensionPath: String
+
+    /// The persistent RPC subprocess — stays alive across messages.
+    private var rpcProcess: PiRpcProcess?
 
     var isPiAvailable: Bool {
         FileManager.default.fileExists(atPath: piPath)
@@ -29,25 +59,41 @@ final class ResearchPiChatManager: ObservableObject {
 
         self.piPath = Self.resolvePiPath()
         self.extensionPath = Self.installLocalExtension(to: paths.piExtensionFile)
+        logger.info("init: piPath=\(self.piPath) extPath=\(self.extensionPath)")
+        logger.info("init: piAvailable=\(self.isPiAvailable) extAvailable=\(self.isExtensionAvailable)")
         load()
     }
+
+    // MARK: - Public API
 
     func send(_ text: String, context: AgentContextSnapshot) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isProcessing else { return }
 
+        logger.info("send: user message — \(trimmed.prefix(100))")
         append(AgentChatMessage(id: UUID(), isUser: true, text: trimmed, createdAt: Date()))
         isProcessing = true
+        streamingText = ""
+        activityStatus = "Starting…"
+
+        // Context file is already kept up-to-date by MainWindowView's
+        // syncPiBridgeContext(), so no need to write it here.
+
+        let prompt = buildPrompt(userMessage: trimmed, context: context)
+        logger.debug("send: built prompt (\(prompt.count) chars)")
 
         Task {
             let reply: String
             if isPiAvailable && isExtensionAvailable {
                 do {
-                    reply = try await runPi(message: buildPrompt(userMessage: trimmed, context: context), continueSession: true)
+                    reply = try await promptRpc(message: prompt)
+                    logger.info("send: got reply (\(reply.count) chars)")
                 } catch {
+                    logger.error("send: promptRpc error — \(error.localizedDescription)")
                     reply = "Pi error: \(error.localizedDescription)"
                 }
             } else {
+                logger.warning("send: pi or extension not available")
                 reply = "Pi or the ResearchReader extension is not available."
             }
 
@@ -55,7 +101,10 @@ final class ResearchPiChatManager: ObservableObject {
                 let parsed = self.parseAgentReply(reply)
                 self.pendingCommands.append(contentsOf: parsed.commands)
                 self.append(AgentChatMessage(id: UUID(), isUser: false, text: parsed.displayText, createdAt: Date()))
+                self.streamingText = ""
+                self.activityStatus = ""
                 self.isProcessing = false
+                logger.info("send: done, \(parsed.commands.count) UI command(s) extracted")
             }
         }
     }
@@ -67,13 +116,109 @@ final class ResearchPiChatManager: ObservableObject {
     }
 
     func clearConversation() {
+        logger.info("clearConversation")
         messages.removeAll()
         save()
 
-        let fm = FileManager.default
-        try? fm.removeItem(at: paths.piSessionDirectory)
-        try? fm.createDirectory(at: paths.piSessionDirectory, withIntermediateDirectories: true)
+        // Tell the RPC process to start a new session instead of killing it
+        Task {
+            if let rpc = rpcProcess {
+                try? await rpc.resetSession()
+            }
+        }
     }
+
+    func stopAgent() {
+        logger.info("stopAgent")
+        Task {
+            await rpcProcess?.stop()
+            rpcProcess = nil
+        }
+    }
+
+    // MARK: - RPC Subprocess
+
+    private func ensureRpcProcess() -> PiRpcProcess {
+        if let existing = rpcProcess {
+            return existing
+        }
+        logger.info("ensureRpcProcess: creating new PiRpcProcess")
+        let rpc = PiRpcProcess(
+            piPath: piPath,
+            extensionPath: extensionPath,
+            sessionDir: paths.piSessionDirectory.path,
+            bridgeDir: paths.piBridgeDirectory.path,
+            configDir: paths.piConfigDirectory.path,
+            workingDir: paths.rootDirectory.path
+        )
+        rpcProcess = rpc
+        return rpc
+    }
+
+    private func promptRpc(message: String) async throws -> String {
+        let rpc = ensureRpcProcess()
+
+        // Thread-safe accumulator for streaming text
+        let accumulator = StreamTextAccumulator()
+
+        try await rpc.prompt(message) { [weak self] delta in
+            switch delta {
+            case .textDelta(let text):
+                let current = accumulator.append(text)
+                Task { @MainActor [weak self] in
+                    self?.streamingText = current
+                    self?.activityStatus = "Responding…"
+                }
+
+            case .toolStart(let name, let callId):
+                logger.info("toolStart: \(name) [\(callId)]")
+                let displayName = Self.friendlyToolName(name)
+                Task { @MainActor [weak self] in
+                    self?.activityStatus = "Running \(displayName)…"
+                }
+
+            case .toolEnd(let name, let callId, let isError):
+                logger.info("toolEnd: \(name) [\(callId)] error=\(isError)")
+                Task { @MainActor [weak self] in
+                    if isError {
+                        self?.activityStatus = "\(Self.friendlyToolName(name)) failed"
+                    } else {
+                        self?.activityStatus = "Thinking…"
+                    }
+                }
+
+            case .agentEnd:
+                logger.info("agentEnd received in delta handler")
+
+            case .error(let msg):
+                logger.error("error delta: \(msg)")
+                _ = accumulator.append("\n[Error: \(msg)]")
+                Task { @MainActor [weak self] in
+                    self?.activityStatus = "Error: \(msg)"
+                }
+            }
+        }
+
+        return accumulator.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Map internal tool names to readable labels for the UI status.
+    private nonisolated static func friendlyToolName(_ name: String) -> String {
+        switch name {
+        case "get_reader_context":      return "reading context"
+        case "get_project_notebook":    return "reading notebook"
+        case "replace_project_notebook": return "updating notebook"
+        case "append_project_notebook": return "appending to notebook"
+        case "go_to_pdf_page":          return "navigating PDF"
+        case "focus_pdf_annotation":    return "focusing annotation"
+        case "preview_pdf_annotation":  return "previewing annotation"
+        case "preview_pdf_text":        return "previewing text"
+        case "clear_pdf_preview":       return "clearing preview"
+        default:                        return name
+        }
+    }
+
+    // MARK: - Persistence
 
     private func append(_ message: AgentChatMessage) {
         messages.append(message)
@@ -85,7 +230,9 @@ final class ResearchPiChatManager: ObservableObject {
         do {
             let data = try Data(contentsOf: paths.chatHistoryFile)
             messages = try decoder.decode([AgentChatMessage].self, from: data)
+            logger.info("load: restored \(self.messages.count) messages")
         } catch {
+            logger.error("load: failed — \(error.localizedDescription)")
             messages = []
         }
     }
@@ -99,88 +246,35 @@ final class ResearchPiChatManager: ObservableObject {
         }
     }
 
-    private func runPi(message: String, continueSession: Bool) async throws -> String {
-        let process = Process()
-        let args = buildPiArgs(message: message, continueSession: continueSession)
-
-        let bundledPiPath = Bundle.main.resourceURL?.appendingPathComponent("Support/pi").path
-        let isBundled = bundledPiPath == piPath
-
-        if isBundled {
-            process.executableURL = URL(fileURLWithPath: piPath)
-            process.arguments = args
-        } else {
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            let escapedArgs = args.map { arg in
-                "'\(arg.replacingOccurrences(of: "'", with: "'\\''"))'"
-            }.joined(separator: " ")
-            let shellCommand = """
-            export PATH="$HOME/.nvm/versions/node/v22.16.0/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-            "\(piPath)" \(escapedArgs)
-            """
-            process.arguments = ["-c", shellCommand]
-        }
-
-        process.environment = buildEnvironment()
-        process.currentDirectoryURL = paths.rootDirectory
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-
-        try process.run()
-
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global().async {
-                process.waitUntilExit()
-
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? ""
-                let cleanOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
-
-                if !cleanOutput.isEmpty {
-                    continuation.resume(returning: cleanOutput)
-                } else {
-                    continuation.resume(throwing: NSError(
-                        domain: "ResearchPiChat",
-                        code: Int(process.terminationStatus),
-                        userInfo: [NSLocalizedDescriptionKey: output]
-                    ))
-                }
-            }
-        }
-    }
-
-    private func buildEnvironment() -> [String: String] {
-        var env = ProcessInfo.processInfo.environment
-        env["PI_CODING_AGENT_DIR"] = paths.piConfigDirectory.path
-        env["RESEARCHREADER_BRIDGE_DIR"] = paths.piBridgeDirectory.path
-        return env
-    }
-
-    private func buildPiArgs(message: String, continueSession: Bool) -> [String] {
-        var args: [String] = []
-        args += ["--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"]
-        args += ["--extension", extensionPath]
-        args += ["--session-dir", paths.piSessionDirectory.path]
-        if continueSession, !messages.isEmpty {
-            args += ["--continue"]
-        }
-        args += ["--print"]
-        args += ["--provider", "anthropic"]
-        args += ["--model", "claude-haiku-4-5"]
-        args += ["--system", systemPrompt]
-        args += [message]
-        return args
-    }
+    // MARK: - Prompt Building
 
     private func buildPrompt(userMessage: String, context: AgentContextSnapshot) -> String {
         var lines: [String] = []
         lines.append("- Active project: \(context.projectName ?? "None")")
+        if let notebook = context.notebook {
+            lines.append("- Active notebook: \(notebook.projectName) (\(notebook.filePath))")
+            let preview = notebook.markdown
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(1400)
+            if !preview.isEmpty {
+                lines.append("- Notebook preview:")
+                lines.append(String(preview))
+            } else {
+                lines.append("- Notebook preview: empty")
+            }
+        } else {
+            lines.append("- Active notebook: None")
+        }
         if let paper = context.paper {
             lines.append("- Active paper: \(paper.title)")
         } else {
             lines.append("- Active paper: None")
+        }
+        if let selection = context.currentSelection {
+            lines.append("- Current selection on page \(selection.page):")
+            lines.append(selection.text)
+        } else {
+            lines.append("- Current selection: None")
         }
 
         lines.append("")
@@ -189,57 +283,7 @@ final class ResearchPiChatManager: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
-    private let systemPrompt = """
-You are the integrated Pi coding agent inside ResearchReader, a native macOS paper-reading app.
-
-Your role:
-- Help the user think through papers, summarize, compare, critique, and extract implementation ideas.
-- Use the ResearchReader extension tools to inspect the active project, paper, page, and annotations.
-- If the user asks coding questions inspired by the active paper, reason like a practical software engineer.
-- If the current paper is relevant, anchor your answer to it directly rather than speaking abstractly.
-
-Behavior:
-- Be concise and concrete.
-- Prefer actionable answers over generic background.
-- When context is missing, say what is missing instead of pretending.
-- Treat the active project as the user's working set and the active paper as the primary reference.
-- When the user refers to "this paper", "the current page", highlights, notes, or PDF navigation, call `get_reader_context` first unless the answer is already obvious from the conversation.
-- Use the PDF tools directly when navigation or temporary preview would help the user.
-"""
-
-    private static func resolvePiPath() -> String {
-        let bundled = Bundle.main.resourceURL?.appendingPathComponent("Support/pi").path
-        let candidates = [
-            bundled,
-            NSHomeDirectory() + "/.nvm/versions/node/v22.16.0/bin/pi",
-            "/opt/homebrew/bin/pi",
-            "/usr/local/bin/pi",
-        ].compactMap { $0 }
-
-        return candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) ?? (bundled ?? "")
-    }
-
-    private static func installLocalExtension(to destination: URL) -> String {
-        let candidatePaths = [
-            Bundle.main.resourceURL.map { $0.appendingPathComponent("Support/research-reader-pi-extension/index.js").path() },
-            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("PiExtension/index.js").path(),
-            "/Users/swair/work/projects/research-reader/PiExtension/index.js",
-        ].compactMap { $0 }
-
-        guard let sourcePath = candidatePaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
-            return destination.path()
-        }
-
-        do {
-            let sourceURL = URL(fileURLWithPath: sourcePath)
-            let data = try Data(contentsOf: sourceURL)
-            try data.write(to: destination, options: Data.WritingOptions.atomic)
-        } catch {
-            return sourcePath
-        }
-
-        return destination.path
-    }
+    // MARK: - Reply Parsing
 
     private func parseAgentReply(_ raw: String) -> (displayText: String, commands: [AgentUICommand]) {
         let pattern = #"\[\[(goto_page|focus_annotation|preview_annotation|preview_text)\s*:\s*([^\]]+)\]\]|\[\[(clear_preview)\]\]"#
@@ -315,5 +359,41 @@ Behavior:
 
         guard let page, let text, !text.isEmpty else { return nil }
         return .previewText(page: page, text: text)
+    }
+
+    // MARK: - Path Resolution
+
+    private static func resolvePiPath() -> String {
+        let bundled = Bundle.main.resourceURL?.appendingPathComponent("Support/pi").path
+        let candidates = [
+            bundled,
+            NSHomeDirectory() + "/.nvm/versions/node/v22.16.0/bin/pi",
+            "/opt/homebrew/bin/pi",
+            "/usr/local/bin/pi",
+        ].compactMap { $0 }
+
+        return candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) ?? (bundled ?? "")
+    }
+
+    private static func installLocalExtension(to destination: URL) -> String {
+        let candidatePaths = [
+            Bundle.main.resourceURL.map { $0.appendingPathComponent("Support/research-reader-pi-extension/index.js").path() },
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("PiExtension/index.js").path(),
+            "/Users/swair/work/projects/research-reader/PiExtension/index.js",
+        ].compactMap { $0 }
+
+        guard let sourcePath = candidatePaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+            return destination.path()
+        }
+
+        do {
+            let sourceURL = URL(fileURLWithPath: sourcePath)
+            let data = try Data(contentsOf: sourceURL)
+            try data.write(to: destination, options: Data.WritingOptions.atomic)
+        } catch {
+            return sourcePath
+        }
+
+        return destination.path
     }
 }

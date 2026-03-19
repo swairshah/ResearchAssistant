@@ -77,6 +77,7 @@ struct AgentChatPanel: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 contextRow(title: "Project", value: context.projectName ?? "None")
+                contextRow(title: "Notebook", value: notebookStatusText)
                 if let paper = context.paper {
                     contextRow(title: "Paper", value: paper.title)
                 } else {
@@ -111,14 +112,23 @@ struct AgentChatPanel: View {
                     }
 
                     if chatManager.isProcessing {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Pi is thinking…")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        if !chatManager.streamingText.isEmpty {
+                            // Show the response as it streams in
+                            AgentStreamingBubble(
+                                text: chatManager.streamingText,
+                                activityStatus: chatManager.activityStatus
+                            )
+                        } else {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text(chatManager.activityStatus.isEmpty ? "Pi is thinking…" : chatManager.activityStatus)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 16)
                         }
-                        .padding(.horizontal, 16)
+                        Color.clear.frame(height: 1).id("streaming-bottom")
                     }
                 }
                 .padding(.vertical, 16)
@@ -128,6 +138,12 @@ struct AgentChatPanel: View {
                     withAnimation(.easeOut(duration: 0.15)) {
                         proxy.scrollTo(last.id, anchor: .bottom)
                     }
+                }
+            }
+            .onChange(of: chatManager.streamingText) { _, _ in
+                // Keep scrolled to bottom while streaming
+                if chatManager.isProcessing {
+                    proxy.scrollTo("streaming-bottom", anchor: .bottom)
                 }
             }
         }
@@ -158,6 +174,18 @@ struct AgentChatPanel: View {
         inputText = ""
     }
 
+    private var notebookStatusText: String {
+        guard let notebook = context.notebook else {
+            return "None"
+        }
+
+        let count = notebook.markdown.trimmingCharacters(in: .whitespacesAndNewlines).count
+        if count == 0 {
+            return "\(notebook.projectName) notebook"
+        }
+        return "\(notebook.projectName) notebook, \(count) chars"
+    }
+
     private func contextRow(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title.uppercased())
@@ -167,6 +195,37 @@ struct AgentChatPanel: View {
                 .font(.callout)
                 .lineLimit(2)
         }
+    }
+}
+
+private struct AgentStreamingBubble: View {
+    let text: String
+    var activityStatus: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("Pi")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ProgressView()
+                    .controlSize(.mini)
+                if !activityStatus.isEmpty {
+                    Text(activityStatus)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            Text(text)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(Color.black.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
     }
 }
 

@@ -9,6 +9,7 @@ struct MainWindowView: View {
     @StateObject private var piBridge = ResearchPiBridge()
     @StateObject private var piChatManager = ResearchPiChatManager()
     @StateObject private var readerController = PDFReaderController()
+    @StateObject private var notebookStore = ProjectNotebookStore()
     @StateObject private var shortcutMonitor = ShortcutEventMonitor()
     @State private var selectedProjectID: UUID?
     @State private var selectedPaperID: UUID?
@@ -19,12 +20,21 @@ struct MainWindowView: View {
     @State private var isPaperListDropTargeted = false
     @State private var searchText = ""
     @State private var isReaderExpanded = false
+    @State private var isNotebookVisible = false
     @State private var noteDraft = ""
 
     var body: some View {
         Group {
             if isReaderExpanded, let paper = selectedPaper, let pdfURL = selectedPaperPDFURL {
-                FocusedReaderView(paper: paper, pdfURL: pdfURL, readerController: readerController)
+                FocusedReaderView(
+                    paper: paper,
+                    pdfURL: pdfURL,
+                    project: selectedProject,
+                    isNotebookVisible: isNotebookVisible,
+                    notebookText: notebookBinding,
+                    notebookLastSavedAt: notebookStore.lastSavedAt,
+                    readerController: readerController
+                )
             } else {
                 NavigationSplitView {
                     projectSidebar
@@ -118,7 +128,14 @@ struct MainWindowView: View {
                     } label: {
                         Label("Highlight", systemImage: "highlighter")
                     }
-                    .disabled(!readerController.hasSelection)
+                    .disabled(selectedPaper == nil || !readerController.hasSelection)
+
+                    Button {
+                        readerController.removeHighlightsInSelection()
+                    } label: {
+                        Label("Remove Highlight", systemImage: "eraser")
+                    }
+                    .disabled(selectedPaper == nil || !readerController.isDocumentLoaded)
 
                     Button {
                         noteDraft = ""
@@ -126,7 +143,15 @@ struct MainWindowView: View {
                     } label: {
                         Label("Add Note", systemImage: "note.text.badge.plus")
                     }
-                    .disabled(!readerController.isDocumentLoaded)
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            isNotebookVisible.toggle()
+                        }
+                    } label: {
+                        Label(isNotebookVisible ? "Hide Notebook" : "Show Notebook", systemImage: "note.text")
+                    }
+                    .disabled(selectedProject == nil)
                 } else {
                     Button {
                         showingProjectSheet = true
@@ -147,6 +172,37 @@ struct MainWindowView: View {
                         Label("Focus Reader", systemImage: "book.pages")
                     }
                     .disabled(selectedPaper == nil || selectedPaperPDFURL == nil)
+
+                    Button {
+                        readerController.highlightSelection()
+                    } label: {
+                        Label("Highlight", systemImage: "highlighter")
+                    }
+                    .disabled(selectedPaper == nil || !readerController.hasSelection)
+
+                    Button {
+                        readerController.removeHighlightsInSelection()
+                    } label: {
+                        Label("Remove Highlight", systemImage: "eraser")
+                    }
+                    .disabled(selectedPaper == nil || !readerController.isDocumentLoaded)
+
+                    Button {
+                        noteDraft = ""
+                        showingNoteSheet = true
+                    } label: {
+                        Label("Add Note", systemImage: "note.text.badge.plus")
+                    }
+                    .disabled(selectedPaper == nil || !readerController.isDocumentLoaded)
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            isNotebookVisible.toggle()
+                        }
+                    } label: {
+                        Label(isNotebookVisible ? "Hide Notebook" : "Show Notebook", systemImage: "note.text")
+                    }
+                    .disabled(selectedProject == nil)
                 }
             }
 
@@ -163,6 +219,7 @@ struct MainWindowView: View {
             if selectedProjectID == nil {
                 selectedProjectID = store.projects.first?.id
             }
+            notebookStore.load(project: selectedProject)
             syncPaperSelection()
             syncPiBridgeContext()
         }
@@ -170,10 +227,16 @@ struct MainWindowView: View {
             if selectedProjectID == nil {
                 selectedProjectID = store.projects.first?.id
             }
+            notebookStore.load(project: selectedProject)
+            syncPaperSelection()
+            syncPiBridgeContext()
+        }
+        .onChange(of: store.papers) { _, _ in
             syncPaperSelection()
             syncPiBridgeContext()
         }
         .onChange(of: selectedProjectID) { _, _ in
+            notebookStore.load(project: selectedProject)
             syncPaperSelection()
             syncPiBridgeContext()
         }
@@ -196,7 +259,13 @@ struct MainWindowView: View {
         .onChange(of: readerController.pageCount) { _, _ in
             syncPiBridgeContext()
         }
+        .onChange(of: readerController.currentSelection) { _, _ in
+            syncPiBridgeContext()
+        }
         .onChange(of: readerController.annotationSummaries) { _, _ in
+            syncPiBridgeContext()
+        }
+        .onChange(of: notebookStore.markdown) { _, _ in
             syncPiBridgeContext()
         }
         .onDisappear {
@@ -332,8 +401,13 @@ struct MainWindowView: View {
     private var detailPane: some View {
         if let paper = store.paper(for: selectedPaperID) {
             PaperDetailView(
+                project: selectedProject,
+                isNotebookVisible: isNotebookVisible,
                 paper: paper,
                 pdfURL: store.pdfURL(for: paper),
+                readerController: readerController,
+                notebookText: notebookBinding,
+                notebookLastSavedAt: notebookStore.lastSavedAt,
                 onRefreshMetadata: {
                     Task { await store.refreshMetadata(for: paper.id) }
                 },
@@ -341,6 +415,20 @@ struct MainWindowView: View {
                     Task { await store.lookupMetadata(for: paper.id, identifier: identifier) }
                 }
             )
+        } else if let project = selectedProject {
+            if isNotebookVisible {
+                ProjectNotebookView(
+                    project: project,
+                    markdown: notebookBinding,
+                    lastSavedAt: notebookStore.lastSavedAt
+                )
+            } else {
+                ContentUnavailableView(
+                    "Select a Paper",
+                    systemImage: "doc.richtext",
+                    description: Text("Choose a paper to view its PDF, or open the notebook from the toolbar.")
+                )
+            }
         } else {
             ContentUnavailableView(
                 "Select a Paper",
@@ -354,6 +442,10 @@ struct MainWindowView: View {
         store.paper(for: selectedPaperID)
     }
 
+    private var selectedProject: Project? {
+        store.project(for: selectedProjectID)
+    }
+
     private var selectedPaperPDFURL: URL? {
         guard let selectedPaper else { return nil }
         return store.pdfURL(for: selectedPaper)
@@ -361,13 +453,23 @@ struct MainWindowView: View {
 
     private var agentContext: AgentContextSnapshot {
         AgentContextSnapshot(
-            projectName: store.project(for: selectedProjectID)?.name,
+            projectName: selectedProject?.name,
             projectPaperCount: store.papers(in: selectedProjectID).count,
+            projectPapers: store.papers(in: selectedProjectID).map { ProjectPaperSummary(paper: $0) },
             paper: selectedPaper,
             pdfURL: selectedPaperPDFURL,
             currentPage: selectedPaper != nil ? readerController.currentPageNumber : nil,
             pageCount: selectedPaper != nil ? readerController.pageCount : nil,
-            annotations: selectedPaper != nil ? readerController.annotationSummaries : []
+            currentSelection: selectedPaper != nil ? readerController.currentSelection : nil,
+            annotations: selectedPaper != nil ? readerController.annotationSummaries : [],
+            notebook: notebookStore.snapshot(project: selectedProject, papers: store.papers(in: selectedProjectID))
+        )
+    }
+
+    private var notebookBinding: Binding<String> {
+        Binding(
+            get: { notebookStore.markdown },
+            set: { notebookStore.updateMarkdown($0, for: selectedProject) }
         )
     }
 
@@ -510,6 +612,14 @@ struct MainWindowView: View {
                 readerController.previewText(page: page, text: text)
             case .clearPreview:
                 readerController.clearPreview()
+            case .replaceProjectNotebook(let markdown):
+                if let project = selectedProject {
+                    notebookStore.replaceNotebook(with: markdown, for: project)
+                }
+            case .appendProjectNotebook(let markdown):
+                if let project = selectedProject {
+                    notebookStore.appendToNotebook(markdown, for: project)
+                }
             }
         }
     }
@@ -543,6 +653,20 @@ struct MainWindowView: View {
         case .clearPreview:
             readerController.clearPreview()
             return "Cleared PDF preview."
+        case .replaceProjectNotebook(let markdown):
+            guard let project = selectedProject else {
+                return "No active project is selected."
+            }
+            notebookStore.replaceNotebook(with: markdown, for: project)
+            syncPiBridgeContext()
+            return "Replaced the notebook for \(project.name)."
+        case .appendProjectNotebook(let markdown):
+            guard let project = selectedProject else {
+                return "No active project is selected."
+            }
+            notebookStore.appendToNotebook(markdown, for: project)
+            syncPiBridgeContext()
+            return "Appended to the notebook for \(project.name)."
         }
     }
 
@@ -571,13 +695,23 @@ struct MainWindowView: View {
                 showingAgentChat.toggle()
             }
         case .highlightSelection:
-            if isReaderExpanded && readerController.hasSelection {
+            if readerController.isDocumentLoaded {
                 readerController.highlightSelection()
             }
         case .addNote:
-            if isReaderExpanded && readerController.isDocumentLoaded {
+            if readerController.isDocumentLoaded {
                 noteDraft = ""
                 showingNoteSheet = true
+            }
+        case .toggleNotebook:
+            if selectedProject != nil {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isNotebookVisible.toggle()
+                }
+            }
+        case .undo:
+            if readerController.canUndo {
+                readerController.undo()
             }
         }
     }
@@ -664,36 +798,80 @@ private struct PaperRow: View {
 }
 
 private struct PaperDetailView: View {
+    let project: Project?
+    let isNotebookVisible: Bool
     let paper: Paper
     let pdfURL: URL?
+    @ObservedObject var readerController: PDFReaderController
+    @Binding var notebookText: String
+    let notebookLastSavedAt: Date?
     let onRefreshMetadata: () -> Void
     let onLookupIdentifier: (String) -> Void
 
     var body: some View {
         Group {
-            if let pdfURL {
-                PDFDocumentView(url: pdfURL, readerController: nil)
+            if isNotebookVisible, let project {
+                HSplitView {
+                    pdfPane
+                        .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
+
+                    ProjectNotebookView(
+                        project: project,
+                        markdown: $notebookText,
+                        lastSavedAt: notebookLastSavedAt
+                    )
+                    .frame(minWidth: 340, idealWidth: 420, maxWidth: 560, maxHeight: .infinity)
+                }
             } else {
-                ContentUnavailableView(
-                    "PDF Missing",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text("The imported PDF file is no longer available in app storage.")
-                )
+                pdfPane
             }
         }
         .navigationTitle(paper.title)
+    }
+
+    @ViewBuilder
+    private var pdfPane: some View {
+        if let pdfURL {
+            PDFDocumentView(url: pdfURL, paperID: paper.id, readerController: readerController)
+        } else {
+            ContentUnavailableView(
+                "PDF Missing",
+                systemImage: "exclamationmark.triangle",
+                description: Text("The imported PDF file is no longer available in app storage.")
+            )
+        }
     }
 }
 
 private struct FocusedReaderView: View {
     let paper: Paper
     let pdfURL: URL
+    let project: Project?
+    let isNotebookVisible: Bool
+    @Binding var notebookText: String
+    let notebookLastSavedAt: Date?
     @ObservedObject var readerController: PDFReaderController
 
     var body: some View {
-        PDFDocumentView(url: pdfURL, readerController: readerController)
-            .navigationTitle(paper.title)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        Group {
+            if isNotebookVisible, let project {
+                HSplitView {
+                    PDFDocumentView(url: pdfURL, paperID: paper.id, readerController: readerController)
+                        .frame(minWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+
+                    ProjectNotebookView(
+                        project: project,
+                        markdown: $notebookText,
+                        lastSavedAt: notebookLastSavedAt
+                    )
+                    .frame(minWidth: 360, idealWidth: 440, maxWidth: 580, maxHeight: .infinity)
+                }
+            } else {
+                PDFDocumentView(url: pdfURL, paperID: paper.id, readerController: readerController)
+            }
+        }
+        .navigationTitle(paper.title)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

@@ -3,8 +3,11 @@ import Foundation
 struct AppPaths {
     let rootDirectory: URL
     let pdfsDirectory: URL
+    let notebooksDirectory: URL
+    let projectNotebooksDirectory: URL
     let libraryFile: URL
     let chatHistoryFile: URL
+    let annotationStoreFile: URL
     let piSessionDirectory: URL
     let piConfigDirectory: URL
     let piBridgeDirectory: URL
@@ -24,8 +27,11 @@ struct AppPaths {
         )
         let root = appSupport.appendingPathComponent("ResearchReader", isDirectory: true)
         let pdfs = root.appendingPathComponent("Papers", isDirectory: true)
+        let notebooks = root.appendingPathComponent("Notebooks", isDirectory: true)
+        let projectNotebooks = notebooks.appendingPathComponent("Projects", isDirectory: true)
         let library = root.appendingPathComponent("library.json", isDirectory: false)
         let chatHistory = root.appendingPathComponent("agent-chat-history.json", isDirectory: false)
+        let annotationStore = root.appendingPathComponent("annotations.json", isDirectory: false)
         let piSessions = root.appendingPathComponent("sessions/research-reader-agent", isDirectory: true)
         let piConfig = root.appendingPathComponent("pi-agent", isDirectory: true)
         let piBridge = root.appendingPathComponent("pi-bridge", isDirectory: true)
@@ -37,6 +43,8 @@ struct AppPaths {
 
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
         try fm.createDirectory(at: pdfs, withIntermediateDirectories: true)
+        try fm.createDirectory(at: notebooks, withIntermediateDirectories: true)
+        try fm.createDirectory(at: projectNotebooks, withIntermediateDirectories: true)
         try fm.createDirectory(at: piSessions, withIntermediateDirectories: true)
         try fm.createDirectory(at: piConfig, withIntermediateDirectories: true)
         try fm.createDirectory(at: piBridge, withIntermediateDirectories: true)
@@ -47,8 +55,11 @@ struct AppPaths {
         return AppPaths(
             rootDirectory: root,
             pdfsDirectory: pdfs,
+            notebooksDirectory: notebooks,
+            projectNotebooksDirectory: projectNotebooks,
             libraryFile: library,
             chatHistoryFile: chatHistory,
+            annotationStoreFile: annotationStore,
             piSessionDirectory: piSessions,
             piConfigDirectory: piConfig,
             piBridgeDirectory: piBridge,

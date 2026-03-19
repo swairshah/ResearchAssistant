@@ -65,12 +65,26 @@ module.exports = function researchReaderExtension(pi) {
 	pi.registerTool({
 		name: "get_reader_context",
 		label: "Get Reader Context",
-		description: "Get the active project, paper, current PDF page, and saved highlights/notes from ResearchReader.",
-		promptSnippet: "Read the active ResearchReader context, including current paper, page, and annotations.",
+		description: "Get the active project, current notebook, active paper, current PDF page, and saved highlights/notes from ResearchReader.",
+		promptSnippet: "Read the active ResearchReader context, including the project notebook, current paper, page, and annotations.",
 		parameters: EMPTY_OBJECT,
 		async execute() {
 			const context = await readContext();
 			return toolResult(JSON.stringify(context, null, 2));
+		},
+	});
+
+	pi.registerTool({
+		name: "get_project_notebook",
+		label: "Get Project Notebook",
+		description: "Read the current project's markdown notebook and related paper references.",
+		parameters: EMPTY_OBJECT,
+		async execute() {
+			const context = await readContext();
+			if (!context.notebook) {
+				return toolResult("No active project notebook is available.");
+			}
+			return toolResult(JSON.stringify(context.notebook, null, 2));
 		},
 	});
 
@@ -174,6 +188,50 @@ module.exports = function researchReaderExtension(pi) {
 		parameters: EMPTY_OBJECT,
 		async execute() {
 			const message = await sendCommand({ command: "clear_preview" });
+			return toolResult(message);
+		},
+	});
+
+	pi.registerTool({
+		name: "replace_project_notebook",
+		label: "Replace Project Notebook",
+		description: "Replace the active project's markdown notebook with new content.",
+		parameters: {
+			type: "object",
+			properties: {
+				markdown: {
+					type: "string",
+					description: "Full markdown content that should become the notebook body.",
+				},
+			},
+			required: ["markdown"],
+			additionalProperties: false,
+		},
+		async execute(_toolCallId, params) {
+			const markdown = String(params.markdown);
+			const message = await sendCommand({ command: "replace_notebook", markdown });
+			return toolResult(message);
+		},
+	});
+
+	pi.registerTool({
+		name: "append_project_notebook",
+		label: "Append Project Notebook",
+		description: "Append markdown content to the active project's notebook.",
+		parameters: {
+			type: "object",
+			properties: {
+				markdown: {
+					type: "string",
+					description: "Markdown block to append to the end of the notebook.",
+				},
+			},
+			required: ["markdown"],
+			additionalProperties: false,
+		},
+		async execute(_toolCallId, params) {
+			const markdown = String(params.markdown);
+			const message = await sendCommand({ command: "append_notebook", markdown });
 			return toolResult(message);
 		},
 	});

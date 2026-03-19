@@ -8,6 +8,8 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
     case togglePiChat
     case highlightSelection
     case addNote
+    case toggleNotebook
+    case undo
 
     var id: String { rawValue }
 
@@ -23,6 +25,10 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
             return "Highlight Selection"
         case .addNote:
             return "Add Note"
+        case .toggleNotebook:
+            return "Toggle Notebook"
+        case .undo:
+            return "Undo"
         }
     }
 
@@ -38,6 +44,10 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
             return "Create a saved highlight from the current PDF selection."
         case .addNote:
             return "Open the note composer for the current PDF."
+        case .toggleNotebook:
+            return "Show or hide the project notebook panel."
+        case .undo:
+            return "Undo the last annotation action (highlight or note)."
         }
     }
 }
@@ -165,6 +175,8 @@ final class ShortcutSettingsStore: ObservableObject {
         .togglePiChat: AppShortcut(key: "i", modifiersRawValue: NSEvent.ModifierFlags.command.rawValue),
         .highlightSelection: AppShortcut(key: "h", modifiersRawValue: NSEvent.ModifierFlags.command.rawValue),
         .addNote: AppShortcut(key: "n", modifiersRawValue: NSEvent.ModifierFlags.command.rawValue | NSEvent.ModifierFlags.shift.rawValue),
+        .toggleNotebook: AppShortcut(key: "j", modifiersRawValue: NSEvent.ModifierFlags.command.rawValue),
+        .undo: AppShortcut(key: "z", modifiersRawValue: NSEvent.ModifierFlags.command.rawValue),
     ]
 }
 

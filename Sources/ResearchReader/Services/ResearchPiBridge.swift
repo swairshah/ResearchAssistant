@@ -85,16 +85,21 @@ final class ResearchPiBridge: ObservableObject {
 private struct BridgeContextPayload: Codable {
     let projectName: String?
     let projectPaperCount: Int
+    let projectPapers: [BridgeProjectPaperPayload]
     let paper: BridgePaperPayload?
     let currentPage: Int?
     let pageCount: Int?
+    let currentSelection: BridgeSelectionPayload?
     let annotations: [BridgeAnnotationPayload]
+    let notebook: BridgeNotebookPayload?
 
     init(snapshot: AgentContextSnapshot) {
         self.projectName = snapshot.projectName
         self.projectPaperCount = snapshot.projectPaperCount
+        self.projectPapers = snapshot.projectPapers.map { BridgeProjectPaperPayload(summary: $0) }
         self.currentPage = snapshot.currentPage
         self.pageCount = snapshot.pageCount
+        self.currentSelection = snapshot.currentSelection.map { BridgeSelectionPayload(summary: $0) }
         self.paper = snapshot.paper.map {
             BridgePaperPayload(
                 title: $0.title,
@@ -116,6 +121,25 @@ private struct BridgeContextPayload: Codable {
                 note: $0.note
             )
         }
+        self.notebook = snapshot.notebook.map { BridgeNotebookPayload(snapshot: $0) }
+    }
+}
+
+private struct BridgeProjectPaperPayload: Codable {
+    let id: String
+    let title: String
+    let authors: [String]
+    let year: Int?
+    let doi: String?
+    let arxivID: String?
+
+    init(summary: ProjectPaperSummary) {
+        self.id = summary.id.uuidString
+        self.title = summary.title
+        self.authors = summary.authors
+        self.year = summary.year
+        self.doi = summary.doi
+        self.arxivID = summary.arxivID
     }
 }
 
@@ -138,12 +162,45 @@ private struct BridgeAnnotationPayload: Codable {
     let note: String?
 }
 
+private struct BridgeSelectionPayload: Codable {
+    let page: Int
+    let text: String
+
+    init(summary: PDFSelectionSummary) {
+        self.page = summary.page
+        self.text = summary.text
+    }
+}
+
+private struct BridgeNotebookPayload: Codable {
+    let projectID: String
+    let projectName: String
+    let filePath: String
+    let markdown: String
+    let updatedAt: String?
+    let papers: [BridgeProjectPaperPayload]
+
+    init(snapshot: ProjectNotebookSnapshot) {
+        self.projectID = snapshot.projectID.uuidString
+        self.projectName = snapshot.projectName
+        self.filePath = snapshot.filePath
+        self.markdown = snapshot.markdown
+        if let updatedAt = snapshot.updatedAt {
+            self.updatedAt = ISO8601DateFormatter().string(from: updatedAt)
+        } else {
+            self.updatedAt = nil
+        }
+        self.papers = snapshot.papers.map { BridgeProjectPaperPayload(summary: $0) }
+    }
+}
+
 private struct BridgeCommandPayload: Codable {
     let id: String
     let command: String
     let page: Int?
     let text: String?
     let annotationID: String?
+    let markdown: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -151,6 +208,7 @@ private struct BridgeCommandPayload: Codable {
         case page
         case text
         case annotationID = "annotationId"
+        case markdown
     }
 
     func toUICommand() -> AgentUICommand {
@@ -165,6 +223,10 @@ private struct BridgeCommandPayload: Codable {
             return .previewText(page: page ?? 1, text: text ?? "")
         case "clear_preview":
             return .clearPreview
+        case "replace_notebook":
+            return .replaceProjectNotebook(markdown ?? "")
+        case "append_notebook":
+            return .appendProjectNotebook(markdown ?? "")
         default:
             return .clearPreview
         }
