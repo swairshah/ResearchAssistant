@@ -221,7 +221,7 @@ final class PDFReaderController: ObservableObject {
 
         var newRecords: [LocalAnnotationRecord] = []
         for entry in grouped.values {
-            guard let document = pdfView?.document,
+            guard let document = entry.page.document ?? pdfView?.document,
                   let pageNumber = safePageNumber(for: entry.page, in: document),
                   !entry.rects.isEmpty else {
                 continue
@@ -255,6 +255,15 @@ final class PDFReaderController: ObservableObject {
     }
 
     func removeHighlightsInSelection() {
+        removeHighlightsInSelection(from: nil, annotation: nil, hitPage: nil, hitPointOnPage: nil)
+    }
+
+    func removeHighlightsInSelection(
+        from explicitSelection: PDFSelection?,
+        annotation explicitAnnotation: PDFAnnotation?,
+        hitPage explicitHitPage: PDFPage?,
+        hitPointOnPage explicitHitPointOnPage: CGPoint?
+    ) {
         guard let paperID = activePaperID else { return }
         clearPreview()
 
@@ -263,19 +272,34 @@ final class PDFReaderController: ObservableObject {
 
         var idsToRemove = Set<String>()
 
-        // 1) If user clicked/right-clicked a highlight, remove that exact record first.
-        if let annotation = lastHitAnnotation,
+        // 1) If user clicked/right-clicked a highlight annotation, remove that exact record first.
+        if let annotation = explicitAnnotation ?? lastHitAnnotation,
            let id = localAnnotationIDByObject[ObjectIdentifier(annotation)] ?? annotationPersistentID(annotation),
            records.contains(where: { $0.id == id }) {
             idsToRemove.insert(id)
         }
 
-        // 2) Selection overlap removes all intersecting highlight records.
-        if let selection = currentOrCachedSelection(),
-           let document = pdfView?.document {
+        // 2) If we have an explicit hit point on page, remove intersecting highlight(s) there.
+        if idsToRemove.isEmpty,
+           let hitPage = explicitHitPage,
+           let hitPoint = explicitHitPointOnPage,
+           let document = hitPage.document ?? pdfView?.document,
+           let pageNumber = safePageNumber(for: hitPage, in: document) {
+            let pageRecords = records.filter { $0.page == pageNumber }
+            for record in pageRecords {
+                if record.rects.contains(where: { $0.insetBy(dx: -2, dy: -2).contains(hitPoint) }) {
+                    idsToRemove.insert(record.id)
+                }
+            }
+        }
+
+        // 3) Selection overlap removes all intersecting highlight records.
+        if idsToRemove.isEmpty,
+           let selection = explicitSelection ?? currentOrCachedSelection() {
             for lineSelection in selection.selectionsByLine() {
                 for page in lineSelection.pages {
-                    guard let pageNumber = safePageNumber(for: page, in: document) else { continue }
+                    guard let document = page.document ?? pdfView?.document,
+                          let pageNumber = safePageNumber(for: page, in: document) else { continue }
                     let targetRect = lineSelection.bounds(for: page).insetBy(dx: -1.0, dy: -1.0)
                     for record in records where record.page == pageNumber {
                         if record.rects.contains(where: { $0.intersects(targetRect) }) {
@@ -286,16 +310,22 @@ final class PDFReaderController: ObservableObject {
             }
         }
 
-        // 3) Fallback: remove nearest highlight on current page.
+        // 4) Fallback: remove nearest highlight on current page.
         if idsToRemove.isEmpty,
            let pdfView,
-           let page = pdfView.currentPage,
-           let document = pdfView.document,
+           let page = explicitHitPage ?? pdfView.currentPage,
+           let document = page.document ?? pdfView.document,
            let pageNumber = safePageNumber(for: page, in: document) {
             let pageRecords = records.filter { $0.page == pageNumber }
             if !pageRecords.isEmpty {
-                let visibleRect = pdfView.convert(pdfView.bounds, to: page)
-                let target = CGPoint(x: visibleRect.midX, y: visibleRect.midY)
+                let target: CGPoint
+                if let explicitHitPointOnPage {
+                    target = explicitHitPointOnPage
+                } else {
+                    let visibleRect = pdfView.convert(pdfView.bounds, to: page)
+                    target = CGPoint(x: visibleRect.midX, y: visibleRect.midY)
+                }
+
                 let nearest = pageRecords.min { lhs, rhs in
                     let lRect = unionRect(of: lhs.rects)
                     let rRect = unionRect(of: rhs.rects)
@@ -309,7 +339,7 @@ final class PDFReaderController: ObservableObject {
             }
         }
 
-        // 4) Final fallback: remove most recent highlight for this paper.
+        // 5) Final fallback: remove most recent highlight for this paper.
         if idsToRemove.isEmpty, let last = records.last {
             idsToRemove.insert(last.id)
         }
@@ -325,8 +355,34 @@ final class PDFReaderController: ObservableObject {
         }
 
         // Deterministic rerender from DB snapshot.
-        clearLocalOverlayAnnotations()
-        renderLocalAnnotationsFromStore()
+        var documentsToRefresh: [PDFDocument] = []
+        if let doc = pdfView?.document {
+            documentsToRefresh.append(doc)
+        }
+        if let doc = explicitHitPage?.document,
+           !documentsToRefresh.contains(where: { ObjectIdentifier($0) == ObjectIdentifier(doc) }) {
+            documentsToRefresh.append(doc)
+        }
+        if let selection = explicitSelection {
+            for page in selection.pages {
+                guard let doc = page.document else { continue }
+                if !documentsToRefresh.contains(where: { ObjectIdentifier($0) == ObjectIdentifier(doc) }) {
+                    documentsToRefresh.append(doc)
+                }
+            }
+        }
+
+        if documentsToRefresh.isEmpty {
+            clearLocalOverlayAnnotations()
+            renderLocalAnnotationsFromStore()
+        } else {
+            localAnnotationIDByObject.removeAll()
+            for document in documentsToRefresh {
+                clearLocalOverlayAnnotations(in: document)
+                renderLocalAnnotationsFromStore(for: paperID, in: document)
+            }
+        }
+
         updateState()
     }
 
@@ -500,7 +556,10 @@ final class PDFReaderController: ObservableObject {
     private func renderLocalAnnotationsFromStore() {
         guard let paperID = activePaperID,
               let document = pdfView?.document else { return }
+        renderLocalAnnotationsFromStore(for: paperID, in: document)
+    }
 
+    private func renderLocalAnnotationsFromStore(for paperID: UUID, in document: PDFDocument) {
         let records = store.annotations(for: paperID)
         for record in records {
             guard let page = document.page(at: max(0, record.page - 1)) else { continue }
@@ -515,7 +574,10 @@ final class PDFReaderController: ObservableObject {
             localAnnotationIDByObject.removeAll()
             return
         }
+        clearLocalOverlayAnnotations(in: document)
+    }
 
+    private func clearLocalOverlayAnnotations(in document: PDFDocument) {
         for pageIndex in 0..<document.pageCount {
             guard let page = document.page(at: pageIndex) else { continue }
             let localAnnotations = page.annotations.filter { $0.userName == localUserName }
@@ -618,7 +680,7 @@ final class PDFReaderController: ObservableObject {
            let text = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines),
            !text.isEmpty,
            let page = selection.pages.first,
-           let document = pdfView?.document,
+           let document = page.document ?? pdfView?.document,
            let safePage = safePageNumber(for: page, in: document) {
             cachedSelection = selection
             hasSelection = true
@@ -627,7 +689,7 @@ final class PDFReaderController: ObservableObject {
                   let text = cached.string?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !text.isEmpty,
                   let page = cached.pages.first,
-                  let document = pdfView?.document,
+                  let document = page.document ?? pdfView?.document,
                   let safePage = safePageNumber(for: page, in: document) {
             hasSelection = true
             currentSelection = PDFSelectionSummary(page: safePage, text: text)

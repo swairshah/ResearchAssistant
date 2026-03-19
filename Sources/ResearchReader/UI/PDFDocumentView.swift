@@ -19,9 +19,14 @@ struct PDFDocumentView: NSViewRepresentable {
                 readerController?.registerAnnotationHit(annotation)
             }
         }
-        view.onRemoveHighlightRequest = { [weak readerController] in
+        view.onRemoveHighlightRequest = { [weak readerController] annotation, page, pointOnPage in
             Task { @MainActor in
-                readerController?.removeHighlightsInSelection()
+                readerController?.removeHighlightsInSelection(
+                    from: nil,
+                    annotation: annotation,
+                    hitPage: page,
+                    hitPointOnPage: pointOnPage
+                )
             }
         }
         view.onQuickHighlightRequest = { [weak readerController] selection in
@@ -39,9 +44,14 @@ struct PDFDocumentView: NSViewRepresentable {
                 readerController?.registerAnnotationHit(annotation)
             }
         }
-        nsView.onRemoveHighlightRequest = { [weak readerController] in
+        nsView.onRemoveHighlightRequest = { [weak readerController] annotation, page, pointOnPage in
             Task { @MainActor in
-                readerController?.removeHighlightsInSelection()
+                readerController?.removeHighlightsInSelection(
+                    from: nil,
+                    annotation: annotation,
+                    hitPage: page,
+                    hitPointOnPage: pointOnPage
+                )
             }
         }
         nsView.onQuickHighlightRequest = { [weak readerController] selection in
@@ -62,11 +72,14 @@ struct PDFDocumentView: NSViewRepresentable {
 
 final class ReaderPDFView: PDFView {
     var onAnnotationHit: ((PDFAnnotation?) -> Void)?
-    var onRemoveHighlightRequest: (() -> Void)?
+    var onRemoveHighlightRequest: ((PDFAnnotation?, PDFPage?, CGPoint?) -> Void)?
     var onQuickHighlightRequest: ((PDFSelection?) -> Void)?
 
     private var hideQuickHighlightWorkItem: DispatchWorkItem?
     private var pendingQuickHighlightSelection: PDFSelection?
+    private var pendingRemoveHighlightAnnotation: PDFAnnotation?
+    private var pendingRemoveHighlightPage: PDFPage?
+    private var pendingRemoveHighlightPointOnPage: CGPoint?
 
     private lazy var quickHighlightPopover: NSPopover = {
         let popover = NSPopover()
@@ -115,14 +128,27 @@ final class ReaderPDFView: PDFView {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        let hit = annotationAt(event: event)
-        onAnnotationHit?(hit)
+        let pointInView = convert(event.locationInWindow, from: nil)
+        let page = page(for: pointInView, nearest: true)
+        let pointOnPage = page.map { convert(pointInView, to: $0) }
 
-        guard let menu = super.menu(for: event) else { return nil }
+        let hit: PDFAnnotation?
+        if let page, let pointOnPage {
+            hit = page.annotation(at: pointOnPage) ?? highlightAnnotation(on: page, at: pointOnPage)
+        } else {
+            hit = nil
+        }
+
+        onAnnotationHit?(hit)
+        pendingRemoveHighlightAnnotation = hit
+        pendingRemoveHighlightPage = page
+        pendingRemoveHighlightPointOnPage = pointOnPage
+
+        let systemMenu = super.menu(for: event)
+        let menu = systemMenu ?? NSMenu(title: "Context")
 
         let isHighlight = ((hit?.type ?? "").lowercased().contains("highlight"))
-        guard isHighlight else { return menu }
-
+        guard isHighlight else { return systemMenu }
         var patched = false
         for item in menu.items {
             let t = item.title.lowercased()
@@ -144,7 +170,11 @@ final class ReaderPDFView: PDFView {
     }
 
     @objc private func handleRemoveHighlightMenuAction(_ sender: Any?) {
-        onRemoveHighlightRequest?()
+        onRemoveHighlightRequest?(
+            pendingRemoveHighlightAnnotation,
+            pendingRemoveHighlightPage,
+            pendingRemoveHighlightPointOnPage
+        )
     }
 
     private var hasTextSelection: Bool {
@@ -205,7 +235,19 @@ final class ReaderPDFView: PDFView {
             return nil
         }
         let pointOnPage = convert(pointInView, to: page)
-        return page.annotation(at: pointOnPage)
+        return page.annotation(at: pointOnPage) ?? highlightAnnotation(on: page, at: pointOnPage)
+    }
+
+    private func highlightAnnotation(on page: PDFPage, at pointOnPage: CGPoint) -> PDFAnnotation? {
+        for annotation in page.annotations.reversed() {
+            let isHighlight = ((annotation.type ?? "").lowercased().contains("highlight"))
+            guard isHighlight else { continue }
+
+            if annotation.bounds.insetBy(dx: -2, dy: -2).contains(pointOnPage) {
+                return annotation
+            }
+        }
+        return nil
     }
 }
 
