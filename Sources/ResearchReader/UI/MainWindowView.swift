@@ -11,6 +11,7 @@ struct MainWindowView: View {
     @StateObject private var readerController = PDFReaderController()
     @StateObject private var notebookStore = ProjectNotebookStore()
     @StateObject private var shortcutMonitor = ShortcutEventMonitor()
+    @StateObject private var voiceInput = PiVoiceInputController()
     @State private var selectedProjectID: UUID?
     @State private var selectedPaperID: UUID?
     @State private var newProjectName = ""
@@ -22,59 +23,14 @@ struct MainWindowView: View {
     @State private var isReaderExpanded = false
     @State private var isNotebookVisible = false
     @State private var noteDraft = ""
+    @State private var queuedVoicePrompts: [String] = []
+    @State private var hasUnreadChatActivity = false
 
     var body: some View {
-        Group {
-            if isReaderExpanded, let paper = selectedPaper, let pdfURL = selectedPaperPDFURL {
-                FocusedReaderView(
-                    paper: paper,
-                    pdfURL: pdfURL,
-                    project: selectedProject,
-                    isNotebookVisible: isNotebookVisible,
-                    notebookText: notebookBinding,
-                    notebookLastSavedAt: notebookStore.lastSavedAt,
-                    readerController: readerController
-                )
-            } else {
-                NavigationSplitView {
-                    projectSidebar
-                } content: {
-                    paperList
-                } detail: {
-                    detailPane
-                }
-                .navigationSplitViewStyle(.balanced)
-                .searchable(text: $searchText, placement: .toolbar, prompt: "Search title, author, DOI, arXiv")
+        AnyView(rootContent)
+            .overlay(alignment: .bottomTrailing) {
+                floatingOverlay
             }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            VStack(alignment: .trailing, spacing: 12) {
-                if showingAgentChat {
-                    AgentChatPanel(
-                        chatManager: piChatManager,
-                        context: agentContext,
-                        onClose: { showingAgentChat = false }
-                    )
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-                }
-
-                Button {
-                    withAnimation(.spring(duration: 0.24)) {
-                        showingAgentChat.toggle()
-                    }
-                } label: {
-                    Image(systemName: showingAgentChat ? "xmark" : "message.badge.waveform.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .frame(width: 48, height: 48)
-                        .foregroundStyle(.white)
-                        .background(Color.accentColor, in: Circle())
-                }
-                .buttonStyle(.plain)
-                .shadow(color: .black.opacity(0.16), radius: 12, y: 6)
-                .help("Open Pi agent")
-            }
-            .padding(20)
-        }
         .sheet(isPresented: $showingProjectSheet) {
             NewProjectSheet(
                 name: $newProjectName,
@@ -171,6 +127,7 @@ struct MainWindowView: View {
             }
         }
         .onAppear {
+            configureVoiceInputCallbacks()
             piBridge.start(commandHandler: executeBridgeCommand)
             shortcutMonitor.start(handler: handleShortcutEvent)
             if selectedProjectID == nil {
@@ -210,6 +167,10 @@ struct MainWindowView: View {
             guard count > 0 else { return }
             executeAgentCommands()
         }
+        .onChange(of: piChatManager.isProcessing) { _, isProcessing in
+            guard !isProcessing else { return }
+            flushQueuedVoicePromptIfNeeded()
+        }
         .onChange(of: readerController.currentPageNumber) { _, _ in
             syncPiBridgeContext()
         }
@@ -236,7 +197,101 @@ struct MainWindowView: View {
         }
         .onDisappear {
             shortcutMonitor.stop()
+            voiceInput.stop()
         }
+    }
+
+    private var rootContent: some View {
+        Group {
+            if isReaderExpanded, let paper = selectedPaper, let pdfURL = selectedPaperPDFURL {
+                FocusedReaderView(
+                    paper: paper,
+                    pdfURL: pdfURL,
+                    project: selectedProject,
+                    isNotebookVisible: isNotebookVisible,
+                    notebookText: notebookBinding,
+                    notebookLastSavedAt: notebookStore.lastSavedAt,
+                    readerController: readerController
+                )
+            } else {
+                NavigationSplitView {
+                    projectSidebar
+                } content: {
+                    paperList
+                } detail: {
+                    detailPane
+                }
+                .navigationSplitViewStyle(.balanced)
+                .searchable(text: $searchText, placement: .toolbar, prompt: "Search title, author, DOI, arXiv")
+            }
+        }
+    }
+
+    private var micButtonColor: Color {
+        switch voiceInput.state {
+        case .error:
+            return .red
+        case .off:
+            return Color.gray.opacity(0.6)
+        case .listening, .transcribing:
+            return .green
+        }
+    }
+
+    private var chatButtonColor: Color {
+        if hasUnreadChatActivity, !showingAgentChat {
+            return Color(red: 0.64, green: 0.86, blue: 0.64)
+        }
+        return Color.accentColor
+    }
+
+    private var floatingOverlay: some View {
+        VStack(alignment: .trailing, spacing: 12) {
+            if showingAgentChat {
+                AgentChatPanel(
+                    chatManager: piChatManager,
+                    context: agentContext,
+                    onClose: { showingAgentChat = false }
+                )
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    voiceInput.toggle()
+                } label: {
+                    Image(systemName: voiceInput.isActive ? "mic.fill" : "mic")
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: 46, height: 46)
+                        .foregroundStyle(.white)
+                        .background(micButtonColor, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .shadow(color: .black.opacity(0.16), radius: 10, y: 5)
+                .help("Voice input: \(voiceInput.state.label) (⌘/)")
+
+                Button {
+                    withAnimation(.spring(duration: 0.24)) {
+                        if showingAgentChat {
+                            showingAgentChat = false
+                        } else {
+                            showingAgentChat = true
+                            hasUnreadChatActivity = false
+                        }
+                    }
+                } label: {
+                    Image(systemName: showingAgentChat ? "xmark" : "message.badge.waveform.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: 48, height: 48)
+                        .foregroundStyle(.white)
+                        .background(chatButtonColor, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .shadow(color: .black.opacity(0.16), radius: 12, y: 6)
+                .help("Open Pi agent")
+            }
+        }
+        .padding(20)
     }
 
     private var projectSidebar: some View {
@@ -560,6 +615,42 @@ struct MainWindowView: View {
         isReaderExpanded = true
     }
 
+    private func configureVoiceInputCallbacks() {
+        voiceInput.onTranscript = { text in
+            enqueueVoicePrompt(text)
+        }
+
+        voiceInput.onError = { _ in
+            NSSound.beep()
+        }
+    }
+
+    private func enqueueVoicePrompt(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if !showingAgentChat {
+            hasUnreadChatActivity = true
+        }
+
+        if piChatManager.isProcessing {
+            queuedVoicePrompts.append(trimmed)
+            return
+        }
+
+        piChatManager.send(trimmed, context: agentContext)
+    }
+
+    private func flushQueuedVoicePromptIfNeeded() {
+        guard !piChatManager.isProcessing,
+              !queuedVoicePrompts.isEmpty else {
+            return
+        }
+
+        let next = queuedVoicePrompts.removeFirst()
+        enqueueVoicePrompt(next)
+    }
+
     private func executeAgentCommands() {
         let commands = piChatManager.consumePendingCommands()
         guard !commands.isEmpty else { return }
@@ -758,8 +849,15 @@ struct MainWindowView: View {
             }
         case .togglePiChat:
             withAnimation(.spring(duration: 0.24)) {
-                showingAgentChat.toggle()
+                if showingAgentChat {
+                    showingAgentChat = false
+                } else {
+                    showingAgentChat = true
+                    hasUnreadChatActivity = false
+                }
             }
+        case .toggleVoiceInput:
+            voiceInput.toggle()
         case .highlightSelection:
             if readerController.isDocumentLoaded {
                 readerController.highlightSelection()

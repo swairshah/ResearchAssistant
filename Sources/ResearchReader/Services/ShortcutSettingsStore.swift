@@ -6,6 +6,7 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
     case focusReader
     case backToLibrary
     case togglePiChat
+    case toggleVoiceInput
     case highlightSelection
     case addNote
     case toggleNotebook
@@ -21,6 +22,8 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
             return "Back To Library"
         case .togglePiChat:
             return "Toggle Pi Chat"
+        case .toggleVoiceInput:
+            return "Toggle Voice Input"
         case .highlightSelection:
             return "Highlight Selection"
         case .addNote:
@@ -40,6 +43,8 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
             return "Return from the focused reader to the library view."
         case .togglePiChat:
             return "Show or hide the floating Pi chat panel."
+        case .toggleVoiceInput:
+            return "Toggle microphone dictation to Pi using local VAD + STT."
         case .highlightSelection:
             return "Create a saved highlight from the current PDF selection."
         case .addNote:
@@ -173,6 +178,7 @@ final class ShortcutSettingsStore: ObservableObject {
         .focusReader: AppShortcut(key: "o", modifiersRawValue: NSEvent.ModifierFlags.command.rawValue),
         .backToLibrary: AppShortcut(key: "b", modifiersRawValue: NSEvent.ModifierFlags.command.rawValue),
         .togglePiChat: AppShortcut(key: "i", modifiersRawValue: NSEvent.ModifierFlags.command.rawValue),
+        .toggleVoiceInput: AppShortcut(key: "/", modifiersRawValue: NSEvent.ModifierFlags.command.rawValue),
         .highlightSelection: AppShortcut(key: "h", modifiersRawValue: NSEvent.ModifierFlags.command.rawValue),
         .addNote: AppShortcut(key: "n", modifiersRawValue: NSEvent.ModifierFlags.command.rawValue | NSEvent.ModifierFlags.shift.rawValue),
         .toggleNotebook: AppShortcut(key: "j", modifiersRawValue: NSEvent.ModifierFlags.command.rawValue),

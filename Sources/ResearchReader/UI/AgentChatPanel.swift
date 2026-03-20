@@ -175,12 +175,13 @@ struct AgentChatPanel: View {
                 .padding(.vertical, 14)
             }
             .background(ChatTheme.surfaceBackgroundSwiftUI)
-            .onChange(of: chatManager.messages.count) { _, _ in
-                if let last = chatManager.messages.last {
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
+            .onAppear {
+                DispatchQueue.main.async {
+                    scrollToBottom(using: proxy, animated: false)
                 }
+            }
+            .onChange(of: chatManager.messages.count) { _, _ in
+                scrollToBottom(using: proxy, animated: true)
             }
             .onChange(of: chatManager.streamingText) { _, _ in
                 if chatManager.isProcessing {
@@ -225,6 +226,24 @@ struct AgentChatPanel: View {
         guard !text.isEmpty else { return }
         chatManager.send(text, context: context)
         inputText = ""
+    }
+
+    private func scrollToBottom(using proxy: ScrollViewProxy, animated: Bool) {
+        let action = {
+            if chatManager.isProcessing {
+                proxy.scrollTo("streaming-bottom", anchor: .bottom)
+            } else if let last = chatManager.messages.last {
+                proxy.scrollTo(last.id, anchor: .bottom)
+            }
+        }
+
+        if animated {
+            withAnimation(.easeOut(duration: 0.15)) {
+                action()
+            }
+        } else {
+            action()
+        }
     }
 
     private var notebookStatusText: String {
