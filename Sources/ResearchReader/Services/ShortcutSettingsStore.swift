@@ -19,7 +19,7 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
         case .focusReader:
             return "Open Paper"
         case .backToLibrary:
-            return "Back To Library"
+            return "Toggle Focus Reader"
         case .togglePiChat:
             return "Toggle Pi Chat"
         case .toggleVoiceInput:
@@ -40,7 +40,7 @@ enum AppShortcutAction: String, CaseIterable, Identifiable {
         case .focusReader:
             return "Expand the selected paper into the focused reader."
         case .backToLibrary:
-            return "Return from the focused reader to the library view."
+            return "Toggle between focused reader and library view."
         case .togglePiChat:
             return "Show or hide the floating Pi chat panel."
         case .toggleVoiceInput:

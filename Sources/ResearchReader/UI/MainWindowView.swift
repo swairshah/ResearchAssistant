@@ -215,9 +215,7 @@ struct MainWindowView: View {
                 )
             } else {
                 NavigationSplitView {
-                    projectSidebar
-                } content: {
-                    paperList
+                    librarySidebar
                 } detail: {
                     detailPane
                 }
@@ -294,31 +292,89 @@ struct MainWindowView: View {
         .padding(20)
     }
 
-    private var projectSidebar: some View {
-        List(selection: $selectedProjectID) {
-            Section {
-                ForEach(store.projects) { project in
-                    ProjectSidebarRow(
-                        project: project,
-                        canDelete: store.projects.count > 1,
-                        onDropProviders: { providers in
-                            handleDrop(providers, into: project.id)
-                        },
-                        onDelete: {
-                            let shouldReselect = selectedProjectID == project.id
-                            store.deleteProject(project.id)
-                            if shouldReselect {
-                                selectedProjectID = store.projects.first?.id
-                            }
-                        }
-                    )
-                    .tag(project.id)
-                }
-            } header: {
-                Text("Projects")
+    private var librarySidebar: some View {
+        List {
+            ForEach(store.projects) { project in
+                projectNode(for: project)
             }
         }
+        .listStyle(.sidebar)
+        .overlay {
+            if isPaperListDropTargeted, selectedProjectID != nil {
+                DropHintView(label: "Drop PDFs to import into this project")
+                    .padding(24)
+            }
+        }
+        .onDrop(
+            of: [UTType.fileURL.identifier],
+            isTargeted: $isPaperListDropTargeted,
+            perform: { providers in
+                guard let projectID = selectedProjectID else { return false }
+                return handleDrop(providers, into: projectID)
+            }
+        )
         .navigationTitle("Research Reader")
+    }
+
+    @ViewBuilder
+    private func projectNode(for project: Project) -> some View {
+        let papers = filteredPapers(in: project.id)
+
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                selectedProjectID = project.id
+                if let selectedPaperID,
+                   store.paper(for: selectedPaperID)?.projectID != project.id {
+                    self.selectedPaperID = papers.first?.id
+                }
+            } label: {
+                ProjectSidebarRow(
+                    project: project,
+                    canDelete: store.projects.count > 1,
+                    onDropProviders: { providers in
+                        handleDrop(providers, into: project.id)
+                    },
+                    onDelete: {
+                        let shouldReselect = selectedProjectID == project.id
+                        store.deleteProject(project.id)
+                        if shouldReselect {
+                            selectedProjectID = store.projects.first?.id
+                        }
+                    }
+                )
+            }
+            .buttonStyle(.plain)
+            .listRowBackground(selectedProjectID == project.id ? Color.accentColor.opacity(0.12) : Color.clear)
+
+            if papers.isEmpty {
+                Text(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "No papers" : "No matching papers")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 36)
+                    .padding(.bottom, 6)
+            } else {
+                ForEach(papers) { paper in
+                    Button {
+                        selectedProjectID = project.id
+                        selectedPaperID = paper.id
+                    } label: {
+                        SidebarPaperRow(paper: paper)
+                            .padding(.leading, 28)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        paperContextMenu(for: paper)
+                    }
+                    .simultaneousGesture(TapGesture(count: 2).onEnded {
+                        selectedProjectID = project.id
+                        selectedPaperID = paper.id
+                        expandSelectedPaper()
+                    })
+                    .listRowBackground(selectedPaperID == paper.id ? Color.accentColor.opacity(0.10) : Color.clear)
+                }
+            }
+        }
+        .padding(.vertical, 2)
     }
 
     private var paperList: some View {
@@ -497,7 +553,11 @@ struct MainWindowView: View {
     }
 
     private var filteredPapers: [Paper] {
-        let papers = store.papers(in: selectedProjectID)
+        filteredPapers(in: selectedProjectID)
+    }
+
+    private func filteredPapers(in projectID: UUID?) -> [Paper] {
+        let papers = store.papers(in: projectID)
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !query.isEmpty else { return papers }
@@ -846,6 +906,8 @@ struct MainWindowView: View {
         case .backToLibrary:
             if isReaderExpanded {
                 isReaderExpanded = false
+            } else {
+                expandSelectedPaper()
             }
         case .togglePiChat:
             withAnimation(.spring(duration: 0.24)) {
@@ -923,6 +985,30 @@ struct MainWindowView: View {
         }
 
         return paper.metadataSource ?? paper.sourceFilename
+    }
+}
+
+private struct SidebarPaperRow: View {
+    let paper: Paper
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "doc.richtext")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(paper.title)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                if let venueLine = [paper.venue, paper.year.map(String.init)].compactMap({ $0 }).joined(separator: " · ").nonEmpty {
+                    Text(venueLine)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer()
+        }
+        .padding(.vertical, 4)
     }
 }
 

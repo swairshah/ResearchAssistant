@@ -19,6 +19,9 @@ let package = Package(
             name: "ResearchReader",
             dependencies: ["COnnxRuntime"],
             path: "Sources/ResearchReader",
+            resources: [
+                .copy("Resources/icon.png"),
+            ],
             linkerSettings: [
                 .unsafeFlags([
                     "-L", "../LocalTalker/vendor/onnxruntime/lib",
