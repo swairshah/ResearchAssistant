@@ -247,6 +247,9 @@ final class ResearchPiChatManager: ObservableObject {
         case "add_pdf_note":            return "adding note"
         case "highlight_pdf_selection": return "highlighting text"
         case "remove_pdf_highlights_in_selection": return "removing highlights"
+        case "list_collections":        return "reading collections"
+        case "add_paper_to_collection": return "adding paper"
+        case "get_active_pdf_text":     return "reading PDF text"
         default:                        return name
         }
     }

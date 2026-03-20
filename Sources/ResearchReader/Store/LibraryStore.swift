@@ -179,9 +179,167 @@ final class LibraryStore: ObservableObject {
         save()
     }
 
+    @discardableResult
+    func addPaperToProject(
+        projectID: UUID,
+        title: String,
+        authors: [String],
+        venue: String?,
+        year: Int?,
+        doi: String?,
+        arxivID: String?,
+        abstractText: String?,
+        sourceLabel: String?,
+        pdfURL: String?,
+        sourceURL: String?
+    ) -> Paper? {
+        guard let projectIndex = projects.firstIndex(where: { $0.id == projectID }) else { return nil }
+
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty else { return nil }
+
+        let normalizedDOI = doi?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalizedArxiv = arxivID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        // De-duplicate within project using DOI/arXiv/title heuristics.
+        let existing = papers.first { paper in
+            guard paper.projectID == projectID else { return false }
+            if let normalizedDOI,
+               let existingDOI = paper.doi?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+               !normalizedDOI.isEmpty,
+               normalizedDOI == existingDOI {
+                return true
+            }
+            if let normalizedArxiv,
+               let existingArxiv = paper.arxivID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+               !normalizedArxiv.isEmpty,
+               normalizedArxiv == existingArxiv {
+                return true
+            }
+            return paper.title.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(normalizedTitle) == .orderedSame
+        }
+
+        if let existing,
+           existing.pdfRelativePath.isEmpty,
+           let index = papers.firstIndex(where: { $0.id == existing.id }),
+           let remotePDF = resolveRemotePDFURL(pdfURL: pdfURL, sourceURL: sourceURL, arxivID: arxivID),
+           let downloaded = downloadPDF(from: remotePDF, id: existing.id) {
+            papers[index].pdfRelativePath = downloaded.relativePath
+            papers[index].sourceFilename = downloaded.sourceFilename
+            save()
+            return papers[index]
+        }
+
+        if let existing {
+            return existing
+        }
+
+        let id = UUID()
+        let remotePDF = resolveRemotePDFURL(pdfURL: pdfURL, sourceURL: sourceURL, arxivID: arxivID)
+        let downloaded = remotePDF.flatMap { downloadPDF(from: $0, id: id) }
+
+        let trimmedSource = sourceLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let sourceFilename = downloaded?.sourceFilename ?? (trimmedSource.isEmpty ? normalizedTitle : trimmedSource)
+
+        let paper = Paper(
+            id: id,
+            projectID: projectID,
+            title: normalizedTitle,
+            authors: authors,
+            venue: venue,
+            year: year,
+            doi: doi,
+            arxivID: arxivID,
+            abstractText: abstractText,
+            pdfRelativePath: downloaded?.relativePath ?? "",
+            sourceFilename: sourceFilename,
+            addedAt: Date(),
+            metadataStatus: .resolved,
+            metadataSource: "pi-web",
+            metadataError: nil
+        )
+
+        papers.append(paper)
+        projects[projectIndex].paperIDs.append(id)
+        save()
+        return paper
+    }
+
     func pdfURL(for paper: Paper) -> URL? {
         guard !paper.pdfRelativePath.isEmpty else { return nil }
         return paths.pdfsDirectory.appendingPathComponent(paper.pdfRelativePath, isDirectory: false)
+    }
+
+    private func resolveRemotePDFURL(pdfURL: String?, sourceURL: String?, arxivID: String?) -> URL? {
+        if let pdfURL,
+           let url = URL(string: pdfURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+           ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            return url
+        }
+
+        if let sourceURL,
+           let url = URL(string: sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+           ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            if url.pathExtension.lowercased() == "pdf" {
+                return url
+            }
+
+            if let arxivFromURL = extractArxivID(from: url) {
+                return arxivPDFURL(from: arxivFromURL)
+            }
+        }
+
+        if let arxivID {
+            return arxivPDFURL(from: arxivID)
+        }
+
+        return nil
+    }
+
+    private func extractArxivID(from url: URL) -> String? {
+        let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !path.isEmpty else { return nil }
+
+        if path.hasPrefix("abs/") {
+            return String(path.dropFirst(4))
+        }
+        if path.hasPrefix("pdf/") {
+            var id = String(path.dropFirst(4))
+            if id.hasSuffix(".pdf") {
+                id.removeLast(4)
+            }
+            return id
+        }
+        return nil
+    }
+
+    private func arxivPDFURL(from rawID: String) -> URL? {
+        var id = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if id.lowercased().hasPrefix("arxiv:") {
+            id = String(id.dropFirst(6))
+        }
+        guard !id.isEmpty else { return nil }
+        return URL(string: "https://arxiv.org/pdf/\(id).pdf")
+    }
+
+    private func downloadPDF(from remoteURL: URL, id: UUID) -> (relativePath: String, sourceFilename: String)? {
+        let destination = paths.pdfsDirectory.appendingPathComponent("\(id).pdf", isDirectory: false)
+
+        do {
+            let data = try Data(contentsOf: remoteURL)
+            guard data.starts(with: Data("%PDF".utf8)) || remoteURL.pathExtension.lowercased() == "pdf" else {
+                return nil
+            }
+            try data.write(to: destination, options: [.atomic])
+
+            let filename = remoteURL.lastPathComponent.isEmpty
+                ? "\(id).pdf"
+                : remoteURL.lastPathComponent
+
+            return (destination.lastPathComponent, filename)
+        } catch {
+            return nil
+        }
     }
 
     private func apply(metadata: ResolvedMetadata, to paperID: UUID) {

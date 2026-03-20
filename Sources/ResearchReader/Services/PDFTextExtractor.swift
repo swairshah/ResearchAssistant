@@ -2,20 +2,31 @@ import Foundation
 import PDFKit
 
 enum PDFTextExtractor {
-    static func extractText(from url: URL, maxPages: Int = 5) -> String {
-        guard let document = PDFDocument(url: url) else {
+    static func extractText(
+        from url: URL,
+        maxPages: Int = 5,
+        startPage: Int? = nil,
+        endPage: Int? = nil
+    ) -> String {
+        guard let document = PDFDocument(url: url), document.pageCount > 0 else {
             return ""
         }
 
-        let pageCount = min(document.pageCount, maxPages)
-        var textChunks: [String] = []
-        textChunks.reserveCapacity(pageCount)
+        let lowerBound = max(1, startPage ?? 1)
+        let upperInput = endPage ?? document.pageCount
+        let upperBound = min(document.pageCount, max(lowerBound, upperInput))
 
-        for index in 0..<pageCount {
-            guard let page = document.page(at: index) else { continue }
+        var textChunks: [String] = []
+        textChunks.reserveCapacity(min(maxPages, upperBound - lowerBound + 1))
+
+        var processed = 0
+        for pageNumber in lowerBound...upperBound {
+            if processed >= maxPages { break }
+            guard let page = document.page(at: pageNumber - 1) else { continue }
             let pageText = page.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !pageText.isEmpty {
-                textChunks.append(pageText)
+                textChunks.append("[Page \(pageNumber)]\n\(pageText)")
+                processed += 1
             }
         }
 

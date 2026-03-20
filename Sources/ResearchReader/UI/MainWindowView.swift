@@ -25,6 +25,9 @@ struct MainWindowView: View {
     @State private var noteDraft = ""
     @State private var queuedVoicePrompts: [String] = []
     @State private var hasUnreadChatActivity = false
+    @State private var expandedProjectIDs: Set<UUID> = []
+    @State private var hoveredProjectID: UUID?
+    @State private var hoveredPaperID: UUID?
 
     var body: some View {
         AnyView(rootContent)
@@ -133,6 +136,7 @@ struct MainWindowView: View {
             if selectedProjectID == nil {
                 selectedProjectID = store.projects.first?.id
             }
+            syncExpandedProjects()
             notebookStore.load(project: selectedProject)
             syncPaperSelection()
             syncPiBridgeContext()
@@ -141,6 +145,7 @@ struct MainWindowView: View {
             if selectedProjectID == nil {
                 selectedProjectID = store.projects.first?.id
             }
+            syncExpandedProjects()
             notebookStore.load(project: selectedProject)
             syncPaperSelection()
             syncPiBridgeContext()
@@ -150,6 +155,7 @@ struct MainWindowView: View {
             syncPiBridgeContext()
         }
         .onChange(of: selectedProjectID) { _, _ in
+            syncExpandedProjects()
             notebookStore.load(project: selectedProject)
             syncPaperSelection()
             syncPiBridgeContext()
@@ -319,17 +325,24 @@ struct MainWindowView: View {
     @ViewBuilder
     private func projectNode(for project: Project) -> some View {
         let papers = filteredPapers(in: project.id)
+        let isExpanded = expandedProjectIDs.contains(project.id)
 
         VStack(alignment: .leading, spacing: 0) {
             Button {
                 selectedProjectID = project.id
-                if let selectedPaperID,
-                   store.paper(for: selectedPaperID)?.projectID != project.id {
-                    self.selectedPaperID = papers.first?.id
+                if isExpanded {
+                    expandedProjectIDs.remove(project.id)
+                } else {
+                    expandedProjectIDs.insert(project.id)
+                    if let selectedPaperID,
+                       store.paper(for: selectedPaperID)?.projectID != project.id {
+                        self.selectedPaperID = papers.first?.id
+                    }
                 }
             } label: {
                 ProjectSidebarRow(
                     project: project,
+                    isExpanded: isExpanded,
                     canDelete: store.projects.count > 1,
                     onDropProviders: { providers in
                         handleDrop(providers, into: project.id)
@@ -344,33 +357,49 @@ struct MainWindowView: View {
                 )
             }
             .buttonStyle(.plain)
-            .listRowBackground(selectedProjectID == project.id ? Color.accentColor.opacity(0.12) : Color.clear)
+            .onHover { isHovering in
+                if isHovering {
+                    hoveredProjectID = project.id
+                } else if hoveredProjectID == project.id {
+                    hoveredProjectID = nil
+                }
+            }
+            .listRowBackground(projectRowBackground(for: project.id))
 
-            if papers.isEmpty {
-                Text(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "No papers" : "No matching papers")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 36)
-                    .padding(.bottom, 6)
-            } else {
-                ForEach(papers) { paper in
-                    Button {
-                        selectedProjectID = project.id
-                        selectedPaperID = paper.id
-                    } label: {
-                        SidebarPaperRow(paper: paper)
-                            .padding(.leading, 28)
+            if isExpanded {
+                if papers.isEmpty {
+                    Text(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "No papers" : "No matching papers")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 36)
+                        .padding(.bottom, 6)
+                } else {
+                    ForEach(papers) { paper in
+                        Button {
+                            selectedProjectID = project.id
+                            selectedPaperID = paper.id
+                        } label: {
+                            SidebarPaperRow(paper: paper)
+                                .padding(.leading, 28)
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { isHovering in
+                            if isHovering {
+                                hoveredPaperID = paper.id
+                            } else if hoveredPaperID == paper.id {
+                                hoveredPaperID = nil
+                            }
+                        }
+                        .contextMenu {
+                            paperContextMenu(for: paper)
+                        }
+                        .simultaneousGesture(TapGesture(count: 2).onEnded {
+                            selectedProjectID = project.id
+                            selectedPaperID = paper.id
+                            expandSelectedPaper()
+                        })
+                        .listRowBackground(paperRowBackground(for: paper.id))
                     }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        paperContextMenu(for: paper)
-                    }
-                    .simultaneousGesture(TapGesture(count: 2).onEnded {
-                        selectedProjectID = project.id
-                        selectedPaperID = paper.id
-                        expandSelectedPaper()
-                    })
-                    .listRowBackground(selectedPaperID == paper.id ? Color.accentColor.opacity(0.10) : Color.clear)
                 }
             }
         }
@@ -533,6 +562,7 @@ struct MainWindowView: View {
             projectName: selectedProject?.name,
             projectPaperCount: store.papers(in: selectedProjectID).count,
             projectPapers: store.papers(in: selectedProjectID).map { ProjectPaperSummary(paper: $0) },
+            collections: store.projects.map { ProjectCollectionSummary(project: $0) },
             paper: selectedPaper,
             pdfURL: selectedPaperPDFURL,
             currentPage: selectedPaper != nil ? readerController.currentPageNumber : nil,
@@ -660,6 +690,38 @@ struct MainWindowView: View {
                 continuation.resume(returning: nil)
             }
         }
+    }
+
+    private func syncExpandedProjects() {
+        let validIDs = Set(store.projects.map(\.id))
+        expandedProjectIDs = expandedProjectIDs.intersection(validIDs)
+
+        if let selectedProjectID {
+            expandedProjectIDs.insert(selectedProjectID)
+        } else if expandedProjectIDs.isEmpty,
+                  let first = store.projects.first?.id {
+            expandedProjectIDs.insert(first)
+        }
+    }
+
+    private func projectRowBackground(for projectID: UUID) -> Color {
+        if selectedProjectID == projectID {
+            return Color.accentColor.opacity(0.18)
+        }
+        if hoveredProjectID == projectID {
+            return Color.accentColor.opacity(0.08)
+        }
+        return Color.clear
+    }
+
+    private func paperRowBackground(for paperID: UUID) -> Color {
+        if selectedPaperID == paperID {
+            return Color.accentColor.opacity(0.20)
+        }
+        if hoveredPaperID == paperID {
+            return Color.accentColor.opacity(0.10)
+        }
+        return Color.clear
     }
 
     private func syncPaperSelection() {
@@ -843,6 +905,65 @@ struct MainWindowView: View {
             }
             readerController.removeHighlightsInSelection()
             return "Removed highlight(s) from current selection/context."
+
+        case .addPaperToCollection(let draft):
+            let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty else {
+                return "Paper title is required."
+            }
+
+            guard let project = resolveCollectionProject(named: draft.collectionName) else {
+                if let requested = draft.collectionName,
+                   !requested.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return "Collection '\(requested)' was not found."
+                }
+                return "No active collection is selected."
+            }
+
+            guard let paper = store.addPaperToProject(
+                projectID: project.id,
+                title: title,
+                authors: draft.authors,
+                venue: draft.venue,
+                year: draft.year,
+                doi: draft.doi,
+                arxivID: draft.arxivID,
+                abstractText: draft.abstractText,
+                sourceLabel: draft.sourceURL ?? title,
+                pdfURL: draft.pdfURL,
+                sourceURL: draft.sourceURL
+            ) else {
+                return "Failed to add paper to collection '\(project.name)'."
+            }
+
+            selectedProjectID = project.id
+            selectedPaperID = paper.id
+            syncPiBridgeContext()
+
+            if paper.pdfRelativePath.isEmpty {
+                return "Added '\(paper.title)' to collection '\(project.name)' without a PDF. Provide a direct PDF URL to attach the file."
+            }
+            return "Added '\(paper.title)' to collection '\(project.name)' with PDF attached."
+
+        case .getActivePDFText(let maxPages, let startPage, let endPage):
+            guard let paper = selectedPaper,
+                  let pdfURL = selectedPaperPDFURL else {
+                return "No active paper PDF is available."
+            }
+
+            let text = PDFTextExtractor.extractText(
+                from: pdfURL,
+                maxPages: maxPages ?? 12,
+                startPage: startPage,
+                endPage: endPage
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard !text.isEmpty else {
+                return "Could not extract readable text from '\(paper.title)'."
+            }
+
+            return "[PDF_TEXT_BEGIN]\nTitle: \(paper.title)\n\n\(text)\n[PDF_TEXT_END]"
         }
     }
 
@@ -864,6 +985,25 @@ struct MainWindowView: View {
             return "PDF is not loaded yet."
         }
         return nil
+    }
+
+    private func resolveCollectionProject(named collectionName: String?) -> Project? {
+        if let collectionName {
+            let trimmed = collectionName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                if let exact = store.projects.first(where: { $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+                    return exact
+                }
+
+                if let contains = store.projects.first(where: { $0.name.localizedCaseInsensitiveContains(trimmed) }) {
+                    return contains
+                }
+
+                return nil
+            }
+        }
+
+        return selectedProject
     }
 
     private func selectPaperForAgent(paperID: String, openInFocusReader: Bool) -> String {
@@ -1197,6 +1337,7 @@ struct StatusBadge: View {
 
 private struct ProjectSidebarRow: View {
     let project: Project
+    let isExpanded: Bool
     let canDelete: Bool
     let onDropProviders: ([NSItemProvider]) -> Bool
     let onDelete: () -> Void
@@ -1204,9 +1345,15 @@ private struct ProjectSidebarRow: View {
     @State private var isDropTargeted = false
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "folder")
+        HStack(spacing: 8) {
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 12)
+
+            Image(systemName: isExpanded ? "folder.fill" : "folder")
                 .foregroundStyle(Color.accentColor)
+
             VStack(alignment: .leading, spacing: 3) {
                 Text(project.name)
                     .font(.body.weight(.medium))

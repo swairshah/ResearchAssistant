@@ -86,6 +86,7 @@ private struct BridgeContextPayload: Codable {
     let projectName: String?
     let projectPaperCount: Int
     let projectPapers: [BridgeProjectPaperPayload]
+    let collections: [BridgeCollectionPayload]
     let paper: BridgePaperPayload?
     let currentPage: Int?
     let pageCount: Int?
@@ -99,6 +100,7 @@ private struct BridgeContextPayload: Codable {
         self.projectName = snapshot.projectName
         self.projectPaperCount = snapshot.projectPaperCount
         self.projectPapers = snapshot.projectPapers.map { BridgeProjectPaperPayload(summary: $0) }
+        self.collections = snapshot.collections.map { BridgeCollectionPayload(summary: $0) }
         self.currentPage = snapshot.currentPage
         self.pageCount = snapshot.pageCount
         self.currentSelection = snapshot.currentSelection.map { BridgeSelectionPayload(summary: $0) }
@@ -145,6 +147,18 @@ private struct BridgeProjectPaperPayload: Codable {
         self.year = summary.year
         self.doi = summary.doi
         self.arxivID = summary.arxivID
+    }
+}
+
+private struct BridgeCollectionPayload: Codable {
+    let id: String
+    let name: String
+    let paperCount: Int
+
+    init(summary: ProjectCollectionSummary) {
+        self.id = summary.id.uuidString
+        self.name = summary.name
+        self.paperCount = summary.paperCount
     }
 }
 
@@ -210,6 +224,20 @@ private struct BridgeCommandPayload: Codable {
     let paperID: String?
     let action: String?
     let openReader: Bool?
+    let maxPages: Int?
+    let startPage: Int?
+    let endPage: Int?
+
+    let title: String?
+    let authors: [String]?
+    let venue: String?
+    let year: Int?
+    let doi: String?
+    let arxivID: String?
+    let abstractText: String?
+    let sourceURL: String?
+    let pdfURL: String?
+    let collectionName: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -221,6 +249,20 @@ private struct BridgeCommandPayload: Codable {
         case paperID = "paperId"
         case action
         case openReader
+        case maxPages
+        case startPage
+        case endPage
+
+        case title
+        case authors
+        case venue
+        case year
+        case doi
+        case arxivID = "arxivId"
+        case abstractText
+        case sourceURL = "sourceUrl"
+        case pdfURL = "pdfUrl"
+        case collectionName
     }
 
     func toUICommand() -> AgentUICommand {
@@ -253,6 +295,23 @@ private struct BridgeCommandPayload: Codable {
             return .highlightSelection
         case "remove_highlights_in_selection":
             return .removeHighlightsInSelection
+        case "add_paper_to_collection":
+            return .addPaperToCollection(
+                PaperCollectionDraft(
+                    title: title ?? "",
+                    authors: authors ?? [],
+                    venue: venue,
+                    year: year,
+                    doi: doi,
+                    arxivID: arxivID,
+                    abstractText: abstractText,
+                    sourceURL: sourceURL,
+                    pdfURL: pdfURL,
+                    collectionName: collectionName
+                )
+            )
+        case "get_active_pdf_text":
+            return .getActivePDFText(maxPages: maxPages, startPage: startPage, endPage: endPage)
         default:
             return .clearPreview
         }

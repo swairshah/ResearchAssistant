@@ -11,6 +11,7 @@ struct AgentContextSnapshot {
     let projectName: String?
     let projectPaperCount: Int
     let projectPapers: [ProjectPaperSummary]
+    let collections: [ProjectCollectionSummary]
     let paper: Paper?
     let pdfURL: URL?
     let currentPage: Int?
@@ -43,6 +44,31 @@ struct ProjectPaperSummary: Codable, Hashable, Identifiable {
         self.doi = paper.doi
         self.arxivID = paper.arxivID
     }
+}
+
+struct ProjectCollectionSummary: Codable, Hashable, Identifiable {
+    let id: UUID
+    let name: String
+    let paperCount: Int
+
+    init(project: Project) {
+        self.id = project.id
+        self.name = project.name
+        self.paperCount = project.paperIDs.count
+    }
+}
+
+struct PaperCollectionDraft: Equatable {
+    let title: String
+    let authors: [String]
+    let venue: String?
+    let year: Int?
+    let doi: String?
+    let arxivID: String?
+    let abstractText: String?
+    let sourceURL: String?
+    let pdfURL: String?
+    let collectionName: String?
 }
 
 struct ProjectNotebookSnapshot: Codable, Hashable {
@@ -88,4 +114,6 @@ enum AgentUICommand: Equatable {
     case addNote(String)
     case highlightSelection
     case removeHighlightsInSelection
+    case addPaperToCollection(PaperCollectionDraft)
+    case getActivePDFText(maxPages: Int?, startPage: Int?, endPage: Int?)
 }

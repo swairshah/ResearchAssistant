@@ -34,7 +34,7 @@ async function sendCommand(command) {
 	const resultPath = path.join(resultsDir, `${id}.json`);
 	await fs.writeFile(commandPath, JSON.stringify({ id, ...command }), "utf8");
 
-	const timeoutMs = 4000;
+	const timeoutMs = 30000;
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
 		try {
@@ -88,6 +88,55 @@ module.exports = function researchReaderExtension(pi) {
 				return toolResult("No active project notebook is available.");
 			}
 			return toolResult(JSON.stringify(context.notebook, null, 2));
+		},
+	});
+
+	pi.registerTool({
+		name: "list_collections",
+		label: "List Collections",
+		description: "List ResearchReader collections/projects available for adding papers.",
+		parameters: EMPTY_OBJECT,
+		async execute() {
+			const context = await readContext();
+			const collections = Array.isArray(context.collections) ? context.collections : [];
+			if (collections.length === 0) {
+				return toolResult("No collections found.");
+			}
+			return toolResult(JSON.stringify(collections, null, 2));
+		},
+	});
+
+	pi.registerTool({
+		name: "get_active_pdf_text",
+		label: "Get Active PDF Text",
+		description: "Extract text from the active paper PDF so you can summarize or analyze actual content.",
+		parameters: {
+			type: "object",
+			properties: {
+				maxPages: {
+					type: "integer",
+					description: "Maximum number of pages to extract (optional).",
+				},
+				startPage: {
+					type: "integer",
+					description: "1-based start page (optional).",
+				},
+				endPage: {
+					type: "integer",
+					description: "1-based end page (optional).",
+				},
+			},
+			additionalProperties: false,
+		},
+		async execute(_toolCallId, params) {
+			const payload = {
+				command: "get_active_pdf_text",
+			};
+			if (params.maxPages !== undefined) payload.maxPages = Number(params.maxPages);
+			if (params.startPage !== undefined) payload.startPage = Number(params.startPage);
+			if (params.endPage !== undefined) payload.endPage = Number(params.endPage);
+			const message = await sendCommand(payload);
+			return toolResult(message);
 		},
 	});
 
@@ -352,6 +401,76 @@ module.exports = function researchReaderExtension(pi) {
 		parameters: EMPTY_OBJECT,
 		async execute() {
 			const message = await sendCommand({ command: "remove_highlights_in_selection" });
+			return toolResult(message);
+		},
+	});
+
+	pi.registerTool({
+		name: "add_paper_to_collection",
+		label: "Add Paper To Collection",
+		description: "Add a paper (metadata) to a collection/project. Useful after web search.",
+		parameters: {
+			type: "object",
+			properties: {
+				title: {
+					type: "string",
+					description: "Paper title.",
+				},
+				authors: {
+					type: "array",
+					items: { type: "string" },
+					description: "Author names.",
+				},
+				venue: {
+					type: "string",
+					description: "Venue or source (optional).",
+				},
+				year: {
+					type: "integer",
+					description: "Publication year (optional).",
+				},
+				doi: {
+					type: "string",
+					description: "DOI (optional).",
+				},
+				arxivId: {
+					type: "string",
+					description: "arXiv identifier (optional).",
+				},
+				abstractText: {
+					type: "string",
+					description: "Abstract text (optional).",
+				},
+				sourceUrl: {
+					type: "string",
+					description: "Source URL for traceability (optional).",
+				},
+				pdfUrl: {
+					type: "string",
+					description: "Direct PDF URL (optional but recommended so the paper is fully openable).",
+				},
+				collectionName: {
+					type: "string",
+					description: "Target collection/project name (optional, defaults to active project).",
+				},
+			},
+			required: ["title"],
+			additionalProperties: false,
+		},
+		async execute(_toolCallId, params) {
+			const message = await sendCommand({
+				command: "add_paper_to_collection",
+				title: String(params.title),
+				authors: Array.isArray(params.authors) ? params.authors.map(String) : [],
+				venue: params.venue === undefined ? undefined : String(params.venue),
+				year: params.year === undefined ? undefined : Number(params.year),
+				doi: params.doi === undefined ? undefined : String(params.doi),
+				arxivId: params.arxivId === undefined ? undefined : String(params.arxivId),
+				abstractText: params.abstractText === undefined ? undefined : String(params.abstractText),
+				sourceUrl: params.sourceUrl === undefined ? undefined : String(params.sourceUrl),
+				pdfUrl: params.pdfUrl === undefined ? undefined : String(params.pdfUrl),
+				collectionName: params.collectionName === undefined ? undefined : String(params.collectionName),
+			});
 			return toolResult(message);
 		},
 	});
