@@ -68,6 +68,14 @@ final class LibraryStore: ObservableObject {
         save()
     }
 
+    func renameProject(_ id: UUID, to newName: String) {
+        guard let index = projects.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        projects[index].name = trimmed
+        save()
+    }
+
     func importPDFs(urls: [URL], into projectID: UUID) async {
         guard let projectIndex = projects.firstIndex(where: { $0.id == projectID }) else { return }
         isImporting = true
@@ -128,6 +136,290 @@ final class LibraryStore: ObservableObject {
                 save()
             }
         }
+    }
+
+    /// Import a paper from a web URL (arXiv page, direct PDF link, or DOI URL).
+    func importFromURL(_ url: URL, into projectID: UUID) async {
+        guard let projectIndex = projects.firstIndex(where: { $0.id == projectID }) else { return }
+        isImporting = true
+        defer { isImporting = false }
+
+        // 1) arXiv abstract or PDF page  →  fetch metadata + download PDF
+        if let arxivID = Self.extractArxivID(from: url) {
+            await importArxivPaper(arxivID: arxivID, sourceURL: url, projectIndex: projectIndex, projectID: projectID)
+            return
+        }
+
+        // 2) DOI URL (e.g. https://doi.org/10.xxxx/...)
+        if let doi = Self.extractDOI(from: url) {
+            await importDOIPaper(doi: doi, sourceURL: url, projectIndex: projectIndex, projectID: projectID)
+            return
+        }
+
+        // 3) Direct PDF link  →  download and extract metadata from the PDF
+        if url.pathExtension.lowercased() == "pdf" || url.absoluteString.lowercased().contains(".pdf") {
+            await importDirectPDF(from: url, projectIndex: projectIndex, projectID: projectID)
+            return
+        }
+
+        // 4) Generic web URL  →  store as a paper with the URL as source, no PDF
+        let paperID = UUID()
+        let title = url.host ?? url.absoluteString
+        let paper = Paper(
+            id: paperID,
+            projectID: projectID,
+            title: title,
+            authors: [],
+            venue: nil,
+            year: nil,
+            doi: nil,
+            arxivID: nil,
+            abstractText: nil,
+            pdfRelativePath: "",
+            sourceFilename: url.absoluteString,
+            addedAt: Date(),
+            metadataStatus: .pending,
+            metadataSource: nil,
+            metadataError: nil
+        )
+        papers.append(paper)
+        projects[projectIndex].paperIDs.append(paperID)
+        save()
+    }
+
+    // MARK: – URL Import Helpers
+
+    private func importArxivPaper(arxivID: String, sourceURL: URL, projectIndex: Int, projectID: UUID) async {
+        // De-duplicate: check if this arXiv ID already exists in the project
+        let normalizedArxiv = arxivID.lowercased()
+        if let existing = papers.first(where: {
+            $0.projectID == projectID &&
+            $0.arxivID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedArxiv
+        }) {
+            // Already have it — if it's missing a PDF, try downloading one
+            if existing.pdfRelativePath.isEmpty,
+               let pdfURL = URL(string: "https://arxiv.org/pdf/\(arxivID).pdf"),
+               let index = papers.firstIndex(where: { $0.id == existing.id }),
+               let downloaded = downloadPDF(from: pdfURL, id: existing.id) {
+                papers[index].pdfRelativePath = downloaded.relativePath
+                papers[index].sourceFilename = downloaded.sourceFilename
+                save()
+            }
+            return
+        }
+
+        let paperID = UUID()
+
+        // Try to fetch metadata from arXiv API
+        do {
+            let metadata = try await metadataLookup.lookup(identifier: arxivID)
+            let pdfURL = URL(string: "https://arxiv.org/pdf/\(arxivID).pdf")
+            let downloaded = pdfURL.flatMap { downloadPDF(from: $0, id: paperID) }
+
+            let paper = Paper(
+                id: paperID,
+                projectID: projectID,
+                title: metadata.title,
+                authors: metadata.authors,
+                venue: metadata.venue,
+                year: metadata.year,
+                doi: metadata.doi,
+                arxivID: arxivID,
+                abstractText: metadata.abstractText,
+                pdfRelativePath: downloaded?.relativePath ?? "",
+                sourceFilename: downloaded?.sourceFilename ?? sourceURL.absoluteString,
+                addedAt: Date(),
+                metadataStatus: .resolved,
+                metadataSource: metadata.source,
+                metadataError: nil
+            )
+            papers.append(paper)
+            projects[projectIndex].paperIDs.append(paperID)
+            save()
+        } catch {
+            // Metadata fetch failed — still create the paper entry
+            let pdfURL = URL(string: "https://arxiv.org/pdf/\(arxivID).pdf")
+            let downloaded = pdfURL.flatMap { downloadPDF(from: $0, id: paperID) }
+
+            let paper = Paper(
+                id: paperID,
+                projectID: projectID,
+                title: "arXiv:\(arxivID)",
+                authors: [],
+                venue: "arXiv",
+                year: nil,
+                doi: nil,
+                arxivID: arxivID,
+                abstractText: nil,
+                pdfRelativePath: downloaded?.relativePath ?? "",
+                sourceFilename: sourceURL.absoluteString,
+                addedAt: Date(),
+                metadataStatus: .failed,
+                metadataSource: nil,
+                metadataError: error.localizedDescription
+            )
+            papers.append(paper)
+            projects[projectIndex].paperIDs.append(paperID)
+            save()
+        }
+    }
+
+    private func importDOIPaper(doi: String, sourceURL: URL, projectIndex: Int, projectID: UUID) async {
+        // De-duplicate
+        let normalizedDOI = doi.lowercased()
+        if papers.contains(where: {
+            $0.projectID == projectID &&
+            $0.doi?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedDOI
+        }) {
+            return
+        }
+
+        let paperID = UUID()
+
+        do {
+            let metadata = try await metadataLookup.lookup(identifier: doi)
+
+            let paper = Paper(
+                id: paperID,
+                projectID: projectID,
+                title: metadata.title,
+                authors: metadata.authors,
+                venue: metadata.venue,
+                year: metadata.year,
+                doi: doi,
+                arxivID: metadata.arxivID,
+                abstractText: metadata.abstractText,
+                pdfRelativePath: "",
+                sourceFilename: sourceURL.absoluteString,
+                addedAt: Date(),
+                metadataStatus: .resolved,
+                metadataSource: metadata.source,
+                metadataError: nil
+            )
+            papers.append(paper)
+            projects[projectIndex].paperIDs.append(paperID)
+            save()
+        } catch {
+            let paper = Paper(
+                id: paperID,
+                projectID: projectID,
+                title: doi,
+                authors: [],
+                venue: nil,
+                year: nil,
+                doi: doi,
+                arxivID: nil,
+                abstractText: nil,
+                pdfRelativePath: "",
+                sourceFilename: sourceURL.absoluteString,
+                addedAt: Date(),
+                metadataStatus: .failed,
+                metadataSource: nil,
+                metadataError: error.localizedDescription
+            )
+            papers.append(paper)
+            projects[projectIndex].paperIDs.append(paperID)
+            save()
+        }
+    }
+
+    private func importDirectPDF(from remoteURL: URL, projectIndex: Int, projectID: UUID) async {
+        let paperID = UUID()
+        let downloaded = downloadPDF(from: remoteURL, id: paperID)
+
+        guard let downloaded else {
+            let paper = Paper(
+                id: paperID,
+                projectID: projectID,
+                title: remoteURL.deletingPathExtension().lastPathComponent,
+                authors: [],
+                venue: nil,
+                year: nil,
+                doi: nil,
+                arxivID: nil,
+                abstractText: nil,
+                pdfRelativePath: "",
+                sourceFilename: remoteURL.absoluteString,
+                addedAt: Date(),
+                metadataStatus: .failed,
+                metadataSource: nil,
+                metadataError: "Failed to download PDF from URL."
+            )
+            papers.append(paper)
+            projects[projectIndex].paperIDs.append(paperID)
+            save()
+            return
+        }
+
+        let localURL = paths.pdfsDirectory.appendingPathComponent(downloaded.relativePath, isDirectory: false)
+        let initialTitle = PDFTextExtractor.suggestedTitle(from: localURL)
+
+        let paper = Paper(
+            id: paperID,
+            projectID: projectID,
+            title: initialTitle,
+            authors: [],
+            venue: nil,
+            year: nil,
+            doi: nil,
+            arxivID: nil,
+            abstractText: nil,
+            pdfRelativePath: downloaded.relativePath,
+            sourceFilename: downloaded.sourceFilename,
+            addedAt: Date(),
+            metadataStatus: .pending,
+            metadataSource: nil,
+            metadataError: nil
+        )
+        papers.append(paper)
+        projects[projectIndex].paperIDs.append(paperID)
+        save()
+
+        await refreshMetadata(for: paperID)
+    }
+
+    // MARK: – URL Pattern Extraction
+
+    /// Extract an arXiv ID from a URL like https://arxiv.org/abs/2301.12345 or https://arxiv.org/pdf/2301.12345.pdf
+    static func extractArxivID(from url: URL) -> String? {
+        guard let host = url.host?.lowercased(),
+              host.contains("arxiv.org") else { return nil }
+
+        let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !path.isEmpty else { return nil }
+
+        if path.hasPrefix("abs/") {
+            return String(path.dropFirst(4))
+        }
+        if path.hasPrefix("pdf/") {
+            var id = String(path.dropFirst(4))
+            if id.hasSuffix(".pdf") { id.removeLast(4) }
+            return id
+        }
+        return nil
+    }
+
+    /// Extract a DOI from a URL like https://doi.org/10.xxxx/yyyy
+    static func extractDOI(from url: URL) -> String? {
+        let str = url.absoluteString
+
+        // doi.org direct link
+        if let host = url.host?.lowercased(), host.contains("doi.org") {
+            let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if path.range(of: #"^10\.[0-9]{4,}/\S+$"#, options: .regularExpression) != nil {
+                return path
+            }
+        }
+
+        // DOI embedded in a query param or URL path
+        let doiPattern = #"10\.[0-9]{4,}\/[^\s&"']*[^\s&"'.,;:]"#
+        if let regex = try? NSRegularExpression(pattern: doiPattern, options: []),
+           let match = regex.firstMatch(in: str, options: [], range: NSRange(str.startIndex..<str.endIndex, in: str)),
+           let range = Range(match.range(at: 0), in: str) {
+            return String(str[range])
+        }
+
+        return nil
     }
 
     func refreshMetadata(for paperID: UUID) async {
