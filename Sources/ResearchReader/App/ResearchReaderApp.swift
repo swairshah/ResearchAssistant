@@ -25,8 +25,13 @@ struct ResearchReaderApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        configureAppIcon()
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Re-apply after launch in case macOS overrides during startup.
         configureAppIcon()
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -37,13 +42,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureAppIcon() {
         guard let icon = loadBaseAppIcon() else { return }
-        NSApp.applicationIconImage = paddedDockIcon(from: icon, insetFraction: 0.10)
+        let padded = paddedDockIcon(from: icon, insetFraction: 0.10)
+        NSApp.applicationIconImage = padded
+        NSApp.dockTile.contentView = nil
+        NSApp.dockTile.display()
     }
 
     private func loadBaseAppIcon() -> NSImage? {
+        // Try loading the .icns from the app bundle first (set via Info.plist CFBundleIconFile)
+        if let icnsName = Bundle.main.infoDictionary?["CFBundleIconFile"] as? String,
+           let icnsURL = Bundle.main.url(forResource: icnsName, withExtension: "icns"),
+           let image = NSImage(contentsOf: icnsURL) {
+            return image
+        }
+
         let candidates: [URL?] = [
+            Bundle.module.url(forResource: "icon", withExtension: "png"),
             Bundle.main.url(forResource: "icon", withExtension: "png"),
             Bundle.main.resourceURL?.appendingPathComponent("icon.png", isDirectory: false),
+            // Look in the app bundle's Resources directory for the SPM resource bundle
+            Bundle.main.resourceURL?
+                .appendingPathComponent("ResearchReader_ResearchReader.bundle", isDirectory: true)
+                .appendingPathComponent("icon.png", isDirectory: false),
             URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
                 .appendingPathComponent("icon.png", isDirectory: false),
         ]
