@@ -16,6 +16,9 @@ struct MainWindowView: View {
     @State private var selectedPaperID: UUID?
     @State private var newProjectName = ""
     @State private var showingProjectSheet = false
+    @State private var showingRenameProjectSheet = false
+    @State private var projectRenameDraft = ""
+    @State private var projectRenameTargetID: UUID?
     @State private var showingAgentChat = false
     @State private var showingNoteSheet = false
     @State private var isPaperListDropTargeted = false
@@ -64,13 +67,39 @@ struct MainWindowView: View {
                 }
             )
         }
+        .sheet(isPresented: $showingRenameProjectSheet) {
+            RenameProjectSheet(
+                name: $projectRenameDraft,
+                onCancel: {
+                    projectRenameDraft = ""
+                    projectRenameTargetID = nil
+                    showingRenameProjectSheet = false
+                },
+                onSave: {
+                    guard let id = projectRenameTargetID else { return }
+                    store.renameProject(id, to: projectRenameDraft)
+                    projectRenameDraft = ""
+                    projectRenameTargetID = nil
+                    showingRenameProjectSheet = false
+                    syncPiBridgeContext()
+                }
+            )
+        }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if isReaderExpanded {
                     Button {
                         isReaderExpanded = false
                     } label: {
-                        Label("Back to Library", systemImage: "sidebar.left")
+                        Label("Library", systemImage: "chevron.left")
+                    }
+                    .help("Back to library (Esc)")
+
+                    Spacer()
+
+                    if store.isImporting {
+                        ProgressView()
+                            .controlSize(.small)
                     }
 
                     Button {
@@ -78,8 +107,9 @@ struct MainWindowView: View {
                             Task { await store.refreshMetadata(for: paper.id) }
                         }
                     } label: {
-                        Label("Refresh Metadata", systemImage: "arrow.clockwise")
+                        Label("Refresh", systemImage: "arrow.clockwise")
                     }
+                    .help("Re-fetch paper metadata")
                     .disabled(selectedPaper == nil)
 
                     Button {
@@ -87,8 +117,9 @@ struct MainWindowView: View {
                             isNotebookVisible.toggle()
                         }
                     } label: {
-                        Label(isNotebookVisible ? "Hide Notebook" : "Show Notebook", systemImage: "note.text")
+                        Label("Notebook", systemImage: isNotebookVisible ? "note.text.badge.plus" : "note.text")
                     }
+                    .help(isNotebookVisible ? "Hide notebook" : "Show notebook")
                     .disabled(selectedProject == nil)
                 } else {
                     Button {
@@ -96,19 +127,29 @@ struct MainWindowView: View {
                     } label: {
                         Label("New Project", systemImage: "folder.badge.plus")
                     }
+                    .help("Create a new project")
 
                     Button {
                         importPDFs()
                     } label: {
-                        Label("Import PDFs", systemImage: "doc.badge.plus")
+                        Label("Import", systemImage: "plus")
                     }
+                    .help("Import PDF files or URLs")
                     .disabled(selectedProjectID == nil || store.isImporting)
+
+                    if store.isImporting {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+
+                    Spacer()
 
                     Button {
                         expandSelectedPaper()
                     } label: {
-                        Label("Focus Reader", systemImage: "book.pages")
+                        Label("Read", systemImage: "book.pages")
                     }
+                    .help("Open paper in focus reader")
                     .disabled(selectedPaper == nil || selectedPaperPDFURL == nil)
 
                     Button {
@@ -116,16 +157,19 @@ struct MainWindowView: View {
                             isNotebookVisible.toggle()
                         }
                     } label: {
-                        Label(isNotebookVisible ? "Hide Notebook" : "Show Notebook", systemImage: "note.text")
+                        Label("Notebook", systemImage: isNotebookVisible ? "note.text.badge.plus" : "note.text")
                     }
+                    .help(isNotebookVisible ? "Hide notebook" : "Show notebook")
                     .disabled(selectedProject == nil)
-                }
-            }
 
-            ToolbarItem {
-                if store.isImporting && !isReaderExpanded {
-                    ProgressView()
-                        .controlSize(.small)
+                    if let paper = selectedPaper {
+                        Button(role: .destructive) {
+                            deleteSelectedPaper()
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                        .help("Delete '\(paper.title)'")
+                    }
                 }
             }
         }
@@ -199,6 +243,12 @@ struct MainWindowView: View {
                   selectedPaperPDFURL != nil else { return }
             withAnimation(.easeInOut(duration: 0.18)) {
                 isReaderExpanded = true
+            }
+        }
+        .onMoveCommand(perform: handleMoveCommand)
+        .onDeleteCommand {
+            if !isReaderExpanded {
+                deleteSelectedPaper()
             }
         }
         .onDisappear {
@@ -301,18 +351,34 @@ struct MainWindowView: View {
     private var librarySidebar: some View {
         List {
             ForEach(store.projects) { project in
-                projectNode(for: project)
+                sidebarProjectHeader(for: project)
+
+                if expandedProjectIDs.contains(project.id) {
+                    let papers = filteredPapers(in: project.id)
+                    if papers.isEmpty {
+                        Text(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "No papers yet" : "No matching papers")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 36)
+                            .padding(.vertical, 2)
+                            .listRowSeparator(.hidden)
+                    } else {
+                        ForEach(papers) { paper in
+                            sidebarPaperRow(paper: paper, projectID: project.id)
+                        }
+                    }
+                }
             }
         }
         .listStyle(.sidebar)
         .overlay {
             if isPaperListDropTargeted, selectedProjectID != nil {
-                DropHintView(label: "Drop PDFs to import into this project")
+                DropHintView(label: "Drop PDFs or URLs to import into this project")
                     .padding(24)
             }
         }
         .onDrop(
-            of: [UTType.fileURL.identifier],
+            of: [UTType.fileURL.identifier, UTType.url.identifier, UTType.plainText.identifier],
             isTargeted: $isPaperListDropTargeted,
             perform: { providers in
                 guard let projectID = selectedProjectID else { return false }
@@ -323,87 +389,82 @@ struct MainWindowView: View {
     }
 
     @ViewBuilder
-    private func projectNode(for project: Project) -> some View {
-        let papers = filteredPapers(in: project.id)
+    private func sidebarProjectHeader(for project: Project) -> some View {
         let isExpanded = expandedProjectIDs.contains(project.id)
+        let papers = filteredPapers(in: project.id)
 
-        VStack(alignment: .leading, spacing: 0) {
-            Button {
-                selectedProjectID = project.id
-                if isExpanded {
-                    expandedProjectIDs.remove(project.id)
-                } else {
-                    expandedProjectIDs.insert(project.id)
-                    if let selectedPaperID,
-                       store.paper(for: selectedPaperID)?.projectID != project.id {
-                        self.selectedPaperID = papers.first?.id
-                    }
-                }
-            } label: {
-                ProjectSidebarRow(
-                    project: project,
-                    isExpanded: isExpanded,
-                    canDelete: store.projects.count > 1,
-                    onDropProviders: { providers in
-                        handleDrop(providers, into: project.id)
-                    },
-                    onDelete: {
-                        let shouldReselect = selectedProjectID == project.id
-                        store.deleteProject(project.id)
-                        if shouldReselect {
-                            selectedProjectID = store.projects.first?.id
-                        }
-                    }
-                )
-            }
-            .buttonStyle(.plain)
-            .onHover { isHovering in
-                if isHovering {
-                    hoveredProjectID = project.id
-                } else if hoveredProjectID == project.id {
-                    hoveredProjectID = nil
+        ProjectSidebarRow(
+            project: project,
+            isExpanded: isExpanded,
+            canDelete: store.projects.count > 1,
+            onDropProviders: { providers in
+                handleDrop(providers, into: project.id)
+            },
+            onRename: {
+                projectRenameTargetID = project.id
+                projectRenameDraft = project.name
+                showingRenameProjectSheet = true
+            },
+            onDelete: {
+                let shouldReselect = selectedProjectID == project.id
+                store.deleteProject(project.id)
+                if shouldReselect {
+                    selectedProjectID = store.projects.first?.id
                 }
             }
-            .listRowBackground(projectRowBackground(for: project.id))
-
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedProjectID = project.id
             if isExpanded {
-                if papers.isEmpty {
-                    Text(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "No papers" : "No matching papers")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, 36)
-                        .padding(.bottom, 6)
-                } else {
-                    ForEach(papers) { paper in
-                        Button {
-                            selectedProjectID = project.id
-                            selectedPaperID = paper.id
-                        } label: {
-                            SidebarPaperRow(paper: paper)
-                                .padding(.leading, 28)
-                        }
-                        .buttonStyle(.plain)
-                        .onHover { isHovering in
-                            if isHovering {
-                                hoveredPaperID = paper.id
-                            } else if hoveredPaperID == paper.id {
-                                hoveredPaperID = nil
-                            }
-                        }
-                        .contextMenu {
-                            paperContextMenu(for: paper)
-                        }
-                        .simultaneousGesture(TapGesture(count: 2).onEnded {
-                            selectedProjectID = project.id
-                            selectedPaperID = paper.id
-                            expandSelectedPaper()
-                        })
-                        .listRowBackground(paperRowBackground(for: paper.id))
-                    }
+                expandedProjectIDs.remove(project.id)
+            } else {
+                expandedProjectIDs.insert(project.id)
+                if let selectedPaperID,
+                   store.paper(for: selectedPaperID)?.projectID != project.id {
+                    self.selectedPaperID = papers.first?.id
                 }
             }
         }
-        .padding(.vertical, 2)
+        .onHover { isHovering in
+            if isHovering {
+                hoveredProjectID = project.id
+            } else if hoveredProjectID == project.id {
+                hoveredProjectID = nil
+            }
+        }
+        .listRowBackground(projectRowBackground(for: project.id))
+        .listRowSeparator(.hidden)
+    }
+
+    @ViewBuilder
+    private func sidebarPaperRow(paper: Paper, projectID: UUID) -> some View {
+        Button {
+            selectedProjectID = projectID
+            selectedPaperID = paper.id
+        } label: {
+            SidebarPaperRow(paper: paper)
+                .padding(.leading, 20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
+            selectedProjectID = projectID
+            selectedPaperID = paper.id
+            expandSelectedPaper()
+        })
+        .onHover { isHovering in
+            if isHovering {
+                hoveredPaperID = paper.id
+            } else if hoveredPaperID == paper.id {
+                hoveredPaperID = nil
+            }
+        }
+        .contextMenu {
+            paperContextMenu(for: paper)
+        }
+        .listRowBackground(paperRowBackground(for: paper.id))
+        .listRowSeparator(.hidden)
     }
 
     private var paperList: some View {
@@ -488,12 +549,12 @@ struct MainWindowView: View {
         }
         .overlay {
             if isPaperListDropTargeted, selectedProjectID != nil {
-                DropHintView(label: "Drop PDFs to import into this project")
+                DropHintView(label: "Drop PDFs or URLs to import into this project")
                     .padding(24)
             }
         }
         .onDrop(
-            of: [UTType.fileURL.identifier],
+            of: [UTType.fileURL.identifier, UTType.url.identifier, UTType.plainText.identifier],
             isTargeted: $isPaperListDropTargeted,
             perform: { providers in
                 guard let projectID = selectedProjectID else { return false }
@@ -629,42 +690,72 @@ struct MainWindowView: View {
     }
 
     private func handleDrop(_ providers: [NSItemProvider], into projectID: UUID) -> Bool {
-        guard providers.contains(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) else {
-            return false
-        }
+        let hasFileURL = providers.contains(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) })
+        let hasURL = providers.contains(where: { $0.hasItemConformingToTypeIdentifier(UTType.url.identifier) })
+        let hasPlainText = providers.contains(where: { $0.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) })
+
+        guard hasFileURL || hasURL || hasPlainText else { return false }
 
         Task {
-            let urls = await loadDroppedPDFURLs(from: providers)
-            guard !urls.isEmpty else { return }
+            let (localPDFs, webURLs) = await loadDroppedURLs(from: providers)
+
+            guard !localPDFs.isEmpty || !webURLs.isEmpty else { return }
 
             selectedProjectID = projectID
-            await store.importPDFs(urls: urls, into: projectID)
+
+            if !localPDFs.isEmpty {
+                await store.importPDFs(urls: localPDFs, into: projectID)
+            }
+
+            for webURL in webURLs {
+                await store.importFromURL(webURL, into: projectID)
+            }
+
             selectedPaperID = store.papers(in: projectID).last?.id
         }
 
         return true
     }
 
-    private func loadDroppedPDFURLs(from providers: [NSItemProvider]) async -> [URL] {
-        await withTaskGroup(of: URL?.self) { group in
-            for provider in providers where provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-                group.addTask {
-                    await loadFileURL(from: provider)
+    /// Returns (localPDFFiles, webURLs) from the drop providers.
+    private func loadDroppedURLs(from providers: [NSItemProvider]) async -> ([URL], [URL]) {
+        var localPDFs: [URL] = []
+        var webURLs: [URL] = []
+
+        for provider in providers {
+            // Try loading as file URL first
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
+               let fileURL = await loadItemURL(from: provider, typeIdentifier: UTType.fileURL.identifier) {
+                if fileURL.isFileURL, fileURL.pathExtension.lowercased() == "pdf" {
+                    localPDFs.append(fileURL)
+                } else if !fileURL.isFileURL, let scheme = fileURL.scheme?.lowercased(), ["http", "https"].contains(scheme) {
+                    webURLs.append(fileURL)
                 }
+                continue
             }
 
-            var urls: [URL] = []
-            for await url in group {
-                guard let url, url.pathExtension.lowercased() == "pdf" else { continue }
-                urls.append(url)
+            // Try loading as generic URL (browser drags often use this)
+            if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier),
+               let url = await loadItemURL(from: provider, typeIdentifier: UTType.url.identifier),
+               let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) {
+                webURLs.append(url)
+                continue
             }
-            return urls
+
+            // Fall back to plain text (some apps drag URLs as plain text)
+            if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
+               let url = await loadPlainTextURL(from: provider),
+               let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) {
+                webURLs.append(url)
+            }
         }
+
+        return (localPDFs, webURLs)
     }
 
-    private func loadFileURL(from provider: NSItemProvider) async -> URL? {
+    private func loadItemURL(from provider: NSItemProvider, typeIdentifier: String) async -> URL? {
         await withCheckedContinuation { continuation in
-            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+            provider.loadItem(forTypeIdentifier: typeIdentifier, options: nil) { item, error in
                 guard error == nil else {
                     continuation.resume(returning: nil)
                     return
@@ -683,6 +774,26 @@ struct MainWindowView: View {
 
                 if let string = item as? String,
                    let url = URL(string: string) {
+                    continuation.resume(returning: url)
+                    return
+                }
+
+                continuation.resume(returning: nil)
+            }
+        }
+    }
+
+    private func loadPlainTextURL(from provider: NSItemProvider) async -> URL? {
+        await withCheckedContinuation { continuation in
+            provider.loadItem(forTypeIdentifier: UTType.plainText.identifier, options: nil) { item, error in
+                guard error == nil else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                if let string = item as? String,
+                   let url = URL(string: string.trimmingCharacters(in: .whitespacesAndNewlines)),
+                   url.scheme != nil {
                     continuation.resume(returning: url)
                     return
                 }
@@ -732,9 +843,62 @@ struct MainWindowView: View {
         selectedPaperID = filteredPapers.first?.id
     }
 
+    private var visibleSidebarPapers: [Paper] {
+        store.projects.flatMap { project -> [Paper] in
+            guard expandedProjectIDs.contains(project.id) else { return [] }
+            return filteredPapers(in: project.id)
+        }
+    }
+
+    private func handleMoveCommand(_ direction: MoveCommandDirection) {
+        guard !isReaderExpanded else { return }
+
+        switch direction {
+        case .down:
+            movePaperSelection(by: 1)
+        case .up:
+            movePaperSelection(by: -1)
+        default:
+            break
+        }
+    }
+
+    private func movePaperSelection(by step: Int) {
+        let papers = visibleSidebarPapers
+        guard !papers.isEmpty else { return }
+
+        guard let currentSelectedPaperID = selectedPaperID,
+              let currentIndex = papers.firstIndex(where: { $0.id == currentSelectedPaperID }) else {
+            let first = papers[0]
+            selectedProjectID = first.projectID
+            self.selectedPaperID = first.id
+            return
+        }
+
+        let nextIndex = max(0, min(papers.count - 1, currentIndex + step))
+        guard nextIndex != currentIndex else { return }
+
+        let next = papers[nextIndex]
+        selectedProjectID = next.projectID
+        expandedProjectIDs.insert(next.projectID)
+        self.selectedPaperID = next.id
+    }
+
     private func expandSelectedPaper() {
         guard selectedPaper != nil, selectedPaperPDFURL != nil else { return }
         isReaderExpanded = true
+    }
+
+    private func deleteSelectedPaper() {
+        guard let paper = selectedPaper else { return }
+        let deletedID = paper.id
+        store.deletePaper(deletedID)
+        if selectedPaperID == deletedID {
+            selectedPaperID = filteredPapers.first?.id
+        }
+        if isReaderExpanded, selectedPaper == nil {
+            isReaderExpanded = false
+        }
     }
 
     private func configureVoiceInputCallbacks() {
@@ -1340,6 +1504,7 @@ private struct ProjectSidebarRow: View {
     let isExpanded: Bool
     let canDelete: Bool
     let onDropProviders: ([NSItemProvider]) -> Bool
+    let onRename: () -> Void
     let onDelete: () -> Void
 
     @State private var isDropTargeted = false
@@ -1369,11 +1534,13 @@ private struct ProjectSidebarRow: View {
                 .fill(isDropTargeted ? Color.accentColor.opacity(0.16) : Color.clear)
         )
         .onDrop(
-            of: [UTType.fileURL.identifier],
+            of: [UTType.fileURL.identifier, UTType.url.identifier, UTType.plainText.identifier],
             isTargeted: $isDropTargeted,
             perform: onDropProviders
         )
         .contextMenu {
+            Button("Rename Project", action: onRename)
+
             if canDelete {
                 Button(role: .destructive, action: onDelete) {
                     Text("Delete Project")
@@ -1406,6 +1573,33 @@ private struct NewProjectSheet: View {
         }
         .padding(20)
         .frame(width: 360)
+    }
+}
+
+private struct RenameProjectSheet: View {
+    @Binding var name: String
+    let onCancel: () -> Void
+    let onSave: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Rename Project")
+                .font(.title3.weight(.semibold))
+
+            TextField("Project name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(onSave)
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                Button("Save", action: onSave)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
     }
 }
 
